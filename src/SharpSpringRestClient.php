@@ -513,6 +513,7 @@ class SharpSpringRestClient {
 
   /**
    * Delete a single lead identified by id.
+   * Be aware that custom fields related with the Lead might not be deleted.
    *
    * @param int $id
    *
@@ -539,6 +540,7 @@ class SharpSpringRestClient {
 
   /**
    * Delete a single lead identified by email address.
+   * Be aware that custom fields related with the Lead might not be deleted.
    *
    * @param string $email
    *
