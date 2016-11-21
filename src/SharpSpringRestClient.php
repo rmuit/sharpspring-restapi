@@ -3,7 +3,6 @@
 namespace SharpSpring\RestaApi;
 
 use Exception;
-use ReflectionObject;
 
 /**
  * Class Lead
@@ -14,7 +13,7 @@ use ReflectionObject;
  * from unqualified to qualified. A lead can be converted into a contact,
  * opportunity, or account
  */
-class Lead extends \stdClass {
+class Lead {
   /**
    * @var int
    */
@@ -128,6 +127,20 @@ class Lead extends \stdClass {
    */
   public $updateTimestamp;
 
+  /**
+   * Lead constructor.
+   *
+   * @param mixed $param
+   *  - When $param is an array we create the Lead object based on this array.
+   *    The keys of array have to be identical with the name of properties.
+   *
+   *  - When param is a string we suppose that it's just an email address.
+   *
+   * @throws \Exception
+   *   To create a Lead object the emailAddress is required. We check both ways
+   *   of creation a Lead object and if emailAddress is not provided we throw
+   *   an Exception.
+   */
   public function __construct($param) {
     if (is_array($param)) {
       if (empty($param['emailAddress'])) {
@@ -143,7 +156,7 @@ class Lead extends \stdClass {
       $this->emailAddress = $param;
     }
     else {
-      throw new Exception('No email address is provided!');
+      throw new Exception('Not a valid email address is provided!');
     }
   }
 
@@ -163,51 +176,76 @@ class SharpSpringRestClient {
   protected $secretKey;
 
   /**
-   * @var string
+   * SharpSpringRestClient constructor.
+   *
+   * @param string $account_id
+   * @param string $secret_key
    */
-  protected $url;
-
-
   public function __construct($account_id, $secret_key) {
     $this->setAccountId($account_id);
     $this->setSecretKey($secret_key);
   }
 
+  /**
+   * Getter of accountId property.
+   *
+   * @return string
+   */
   public function getAccountId() {
     return $this->accountId;
   }
 
+  /**
+   * Setter of accountId property.
+   *
+   * @param string $account_id
+   *
+   * @return mixed
+   */
   public function setAccountId($account_id) {
     $this->accountId = $account_id;
 
     return $account_id;
   }
 
+  /**
+   * Getter of secretKey property.
+   *
+   * @return string
+   */
   public function getSecretKey() {
     return $this->secretKey;
   }
 
+  /**
+   * Setter of secretKey property.
+   *
+   * @param string $secret_key
+   *
+   * @return mixed
+   */
   public function setSecretKey($secret_key) {
     $this->secretKey = $secret_key;
 
     return $secret_key;
   }
 
-  public function getUrl() {
-    return $this->url;
-  }
-
-  public function setUrl($url) {
-    $this->url = $url;
-
-    return $url;
-  }
-
+  /**
+   * Execute a query against REST API.
+   *
+   * @param $data
+   * @param array $query
+   *
+   * @return mixed
+   *   In case of successful request a json will be returned.
+   *
+   * @throws \Exception
+   *   If the request fails an error will be thrown.
+   */
   public function exec($data, $query = []) {
     $url = $this->createUrl($query);
-    $this->setUrl($url);
     $curl = curl_init();
-    curl_setopt($curl, CURLOPT_URL, $this->url);
+    curl_setopt($curl, CURLOPT_URL, $url);
     curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "POST");
     curl_setopt($curl, CURLOPT_POSTFIELDS, $data);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, TRUE);
@@ -219,19 +257,6 @@ class SharpSpringRestClient {
     ]);
 
     $response = curl_exec($curl);
-    // In case of connection error we repeat the request 5 times.
-    if (empty($response)) {
-      $seconds = 5;
-      $i = 1;
-      $count = 5;
-      while (empty($response) && $count >= 0) {
-        sleep($i * $seconds);
-        $response = curl_exec($curl);
-        $i++;
-        $count--;
-      }
-    }
-
     if (!$response) {
       $http_response = curl_getinfo($curl, CURLINFO_HTTP_CODE);
       $body = curl_error($curl);
@@ -242,7 +267,7 @@ class SharpSpringRestClient {
         return '';
       }
       $error = 'CURL Error (' . get_class($this) . ")\n
-        url: $this->url\n
+        url:$url\n
         body: $body";
       throw new Exception($error);
     }
@@ -254,28 +279,25 @@ class SharpSpringRestClient {
       // don't check 301, 302 because setting CURLOPT_FOLLOWLOCATION
       if ($http_response != 200 && $http_response != 201) {
         $error = "CURL HTTP Request Failed: Status Code :
-          $http_response, URL: $this->url
+          $http_response, URL: $url
           \nError Message : $response";
         throw new Exception($error);
       }
     }
     $result = json_decode($response, TRUE);
-    if (!empty($result['error'])) {
-      if (!empty($response['error'])) {
-        if (isset($response['error'][0])) {
-          throw new Exception(sprintf('code: %s. Message: %s', $response['error'][0]['code'], $response['error'][0]['message']));
-        }
-        else {
-          throw new Exception(sprintf('code: %s. Message: %s', $response['error']['code'], $response['error']['message']));
-        }
-      }
-    }
-
 
     return $result;
   }
 
-
+  /**
+   * Helper function to create a url containing the mandatory accountId and
+   * secretKey including the base url of REST API.
+   *
+   * @param array $query
+   *   Possible parameters for the url.
+   *
+   * @return string
+   */
   private function createUrl(array $query = []) {
     $base_query = [
       'accountID' => $this->accountId,
@@ -295,6 +317,13 @@ class SharpSpringRestClient {
     return $url;
   }
 
+  /**
+   * Create a Lead object.
+   *
+   * @param \SharpSpring\RestaApi\Lead $leads
+   *
+   * @return bool|mixed
+   */
   public function createLead(Lead $leads) {
     $aleads = (array) $leads;
     $lead = [];
@@ -383,6 +412,18 @@ class SharpSpringRestClient {
     return $result;
   }
 
+  /**
+   * Get all leads within limit.
+   * @param array $where
+   *   $where can have keys:
+   *   - id
+   *   - emailAddress
+   * @param null $limit
+   *   Limit count of results.
+   * @param null $offset
+   *
+   * @return bool|mixed
+   */
   public function getLeads($where = [], $limit = NULL, $offset = NULL) {
     $params['where'] = $where;
     if (isset($limit)) {
@@ -470,6 +511,13 @@ class SharpSpringRestClient {
     return $result;
   }
 
+  /**
+   * Delete a single lead identified by id.
+   *
+   * @param int $id
+   *
+   * @return bool|mixed
+   */
   public function deleteLead($id) {
     $params['objects'][] = ['id' => $id];
     $requestID = session_id();
@@ -489,6 +537,13 @@ class SharpSpringRestClient {
     return $result;
   }
 
+  /**
+   * Delete a single lead identified by email address.
+   *
+   * @param string $email
+   *
+   * @return array
+   */
   public function deleteLeadByEmail($email) {
     $leads = $this->getLeads(['emailAddress' => $email]);
     $result = [];
@@ -501,6 +556,14 @@ class SharpSpringRestClient {
     return $result;
   }
 
+  /**
+   * Get a list of fields.
+   *
+   * @param int $limit
+   * @param int  $offset
+   *
+   * @return bool|mixed
+   */
   public function getFields($limit = NULL, $offset = NULL) {
     $params = ['where' => []];
     if (isset($limit)) {
