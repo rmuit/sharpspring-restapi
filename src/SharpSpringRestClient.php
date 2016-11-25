@@ -414,6 +414,7 @@ class SharpSpringRestClient {
 
   /**
    * Get all leads within limit.
+   *
    * @param array $where
    *   $where can have keys:
    *   - id
@@ -425,6 +426,9 @@ class SharpSpringRestClient {
    * @return bool|mixed
    */
   public function getLeads($where = [], $limit = NULL, $offset = NULL) {
+    // @todo validate - OR check that the execute call will throw an error for
+    //       unknown keys. Then see how to best treat those errors (which may
+    //       only be possible after I had some more experience with this --RM
     $params['where'] = $where;
     if (isset($limit)) {
       $params['limit'] = $limit;
@@ -927,4 +931,126 @@ class SharpSpringRestClient {
     return $result;
   }
 
+  /**
+   * Returns a list of active Lists.
+   *
+   * @param int $id
+   *   (optional) List ID.
+   *
+   * @return bool|mixed
+   * @throws \Exception
+   */
+  public function getActiveLists($id = NULL) {
+    // 'where' is a required parameter but it may be empty.
+    $params = ['where' => []];
+    if (isset($id)) {
+      $params['where']['id'] = $id;
+    }
+    $requestID = session_id();
+
+    $data = [
+      'method' => 'getActiveLists',
+      'params' => $params,
+      'id' => $requestID,
+    ];
+
+    $data = json_encode($data);
+    $response = $this->exec($data);
+    $result = FALSE;
+    if (isset($response['result'])) {
+      $result = reset($response['result']);
+    }
+
+    return $result;
+  }
+
+  /**
+   * Returns the active members for a specific list
+   *
+   * @param int $id
+   *   List ID. Unknown values will not return a validation error; they will
+   *   just make the method return an empty list.
+   *
+   * @return bool|mixed
+   * @throws \Exception
+   */
+  public function getListMembers($id) {
+    $params = ['where' => ['id' => $id]];
+    $requestID = session_id();
+
+    $data = [
+      'method' => 'getListMembers',
+      'params' => $params,
+      'id' => $requestID,
+    ];
+
+    $data = json_encode($data);
+    $response = $this->exec($data);
+    $result = FALSE;
+    if (isset($response['result'])) {
+      $result = reset($response['result']);
+    }
+
+    return $result;
+  }
+
+  /**
+   * Get the members that are removed from a list.
+   *
+   * @param int $id
+   *   List ID. Unknown values will not return a validation error; they will
+   *   just make the method return an empty list.
+   * @param string $flag
+   *   (optional) "removed", "unsubscribed" or "hardbounced". The REST API will
+   *   default to returning "removed" members. Unknown values will not return
+   *   a validation error; they will just make the method return an empty list.
+   *
+   * @TODO RM: document after you  know you need this / ID is list ID.
+   *
+   * @return bool|mixed
+   * @throws \Exception
+   */
+  public function getRemovedListMembers($id, $flag = NULL) {
+    $params = ['where' => ['id' => $id]];
+    if (isset($flag)) {
+      $params['where']['flag'] = $flag;
+    }
+    $requestID = session_id();
+
+    $data = [
+      'method' => 'getRemovedListMembers',
+      'params' => $params,
+      'id' => $requestID,
+    ];
+
+    $data = json_encode($data);
+    $response = $this->exec($data);
+    $result = FALSE;
+    if (isset($response['result'])) {
+      $result = reset($response['result']);
+    }
+
+    return $result;
+  }
+
+  // RM: I don't know what this is. It's not the list of arguments to supply for
+  // getRemovedListMembers, because it's empty initially.
+  public function getUnsubscribeCategories() {
+    $requestID = session_id();
+
+    $data = [
+      'method' => 'getUnsubscribeCategories',
+      'params' => [],
+      'id' => $requestID,
+    ];
+
+    $data = json_encode($data);
+    $response = $this->exec($data);
+    $result = FALSE;
+    if (isset($response['result'])) {
+      $result = reset($response['result']);
+    }
+
+    return $result;
+  }
 }
