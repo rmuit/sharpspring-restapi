@@ -70,7 +70,7 @@ class Lead extends ValueObject {
    *
    * This is one of the two possible 'identifier properties' for a lead.
    *
-   * It's numeric, but not an int (12 digits/chars) so we document it as string.
+   * It's apparently 12 digits, which fits into an int in most systems.
    *
    * (tested on API v1.117, 20161205:) Is ignored on createLead calls. Is
    * required on updateLead calls, except when updating a lead with a known-
@@ -79,7 +79,7 @@ class Lead extends ValueObject {
    * lead - or nothing at all depending on the e-mail address; see comments at
    * updateLead().)
    *
-   * @var string
+   * @var int
    */
   public $id;
 
@@ -476,9 +476,10 @@ class SharpSpringRestApiException extends \RuntimeException {
    * indexed sub-array for each object processed containing key/value pairs
    * 'success' (bool) and 'error'. Each failed object (of which there must be at
    * least one) has a non-null 'error' section being an array containing
-   * 'message' (string), 'code' (numeric) and 'data' (array) values.
+   * 'message' (string), 'code' (numeric) and 'data' values.
    *
-   * The 'data' could be anything / its exact structure is not explored yet.
+   * The 'data' could be anything / its exact structure is not explored yet. It
+   * is always an array, except for codes < 100; see handleLeads() for those.
    *
    * @return array
    */
@@ -582,7 +583,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Set a custom property to field name mapping for custom Sharpspring fields.
+   * Sets a custom property to field name mapping for custom Sharpspring fields.
    *
    * You need to set this if you use custom fields in Sharpspring, and
    * - either you use arrays as the input to create* / update* functions, having
@@ -615,6 +616,10 @@ class SharpSpringRestClient {
 
   /**
    * Converts an external input object/array to something the REST API can use.
+   *
+   * The difference with the toArray() method on the object itself is that this
+   * method maps custom properties that may have been set on the Connection
+   * object.
    *
    * @param string $object_type
    *   The type of object to set mapping for: 'lead', 'opportunity', 'account'.
@@ -850,7 +855,7 @@ class SharpSpringRestClient {
       catch (\Exception $e) {
         // Just throw a SharpSpringRestApiException (api level, code 0) always,
         // so we can wrap both the result and the exception.
-        throw new SharpSpringRestApiException("$method call indicated no error, but its result structure is unexpected or does contain an individual object error. The wrapped result data / previous exception hold more info.", 0, $result, TRUE, $e);
+        throw new SharpSpringRestApiException("$method call indicated no error, but its result structure is unexpected or does contain an individual object error. The wrapped result data / previous exception hold more info.", 0, $result, FALSE, $e);
       }
     }
 
@@ -990,7 +995,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Executes a query with 'where', 'limit' and 'offset' parameters.
+   * Executes a REST API call with 'where', 'limit' and 'offset' parameters.
    *
    * @param string $method
    *   The REST API method name.
@@ -1000,30 +1005,34 @@ class SharpSpringRestClient {
    *   and an exception is thrown otherwise.
    * @param array $where
    *   Sub-parameters for the 'where' parameter of the method.
-   * @param null $limit
-   *   A limit to the number of objects returned.
-   * @param null $offset
-   *   The index in the full list of objects, of the first object to return.
-   *   Zero-based. (To reiterate: this number is 'object based', not 'batch/page
-   *   based.)
+   * @param int $limit
+   *   (optional) A limit to the number of objects returned.
+   * @param int $offset
+   *   (optional) The index in the full list of objects, of the first object to
+   *   return. Zero-based.
+   * @param array $extra_params
+   *   Parameters for the REST API call in addition to where/limit/offset.
    *
    * @return array
    *   The substructure we expected in the JSON array.
    *
    * @see $this->exec() for throws.
    */
-  protected function execLimitedQuery($method, $single_result_key, array $where, $limit = NULL, $offset = NULL) {
+  protected function execLimitedQuery($method, $single_result_key, array $where, $limit = NULL, $offset = NULL, $extra_params = []) {
+    $params = $extra_params;
     // API method definitions are inconsistent (according to the docs):
-    // - most have 'where' defined as required, even when empty
-    // - some have 'where' defined as optional (getEmailListing - this may not
-    //    be true however; getActiveLists was wrongly documented too)
+    // - most have 'where' defined as required, even when the value is empty
+    // - some have 'where' defined as optional (getEmailListing and
+    //   getActiveLists; the latter however turns out not be wrongly documented;
+    //   it's actually required. Not sure about getEmailListing yet.)
     // - some have no 'where' (getEmailJobs).
     // We'll hardcode these here. This serves as documentation ot the same time.
-    if ($where || !in_array($method, ['getEmailLists', 'getEmailJobs'], TRUE)) {
+    // Any method that passes extra parameters, is assumed *not* to have a
+    // 'where'. (Like getLeadsDateRange, whose limit/offset parameters are
+    // undocumented. We may reorganize this function's arguments later, as more
+    // things are discovered.)
+    if ($where || (!$extra_params &&  !in_array($method, ['getEmailListing', 'getEmailJobs'], TRUE))) {
       $params['where'] = $where;
-    }
-    else {
-      $params = [];
     }
     if (isset($limit)) {
       $params['limit'] = $limit;
@@ -1037,41 +1046,73 @@ class SharpSpringRestClient {
   /**
    * Abstracts some code shared by createLead(s) / updateLead(s) methods.
    *
+   * Where validation is lacking in the REST API, this function will do
+   * validation and throw a SharpSpringRestApiException for invalid leads - but
+   * only after processing the valid leads. Like exec(), it will throw a
+   * 'wrapper' exception if $throw_for_individual_object is false; it will
+   * combine any invalid leads and REST API errors into the exception, as if all
+   * of them were object-level errors from the REST API - except the error codes
+   * are low (below 100) and the 'data' entry might not be an array. See this
+   * method's code for the meaning of error codes.
+   *
    * @param array $leads
    *   Leads. (Both actual Lead objects and arrays are accepted.)
    * @param string $method
    *   The REST API method to call.
    * @param bool $throw_for_individual_object
    *   The 'throw_for_individual_object' key for $response_checks; see exec().
+   *   This may only be set if $leads contains exactly one lead.
    *
    * @return mixed
    *
-   * @throws \InvalidArgumentException
-   *   If the input values are not all Leads.
+   * @throws \Exception
+   *   See callers.
    */
-//@todo also handle arrays, not only Lead objects? Say so in all callers.
   protected function handleLeads(array $leads, $method, $throw_for_individual_object = FALSE) {
     $params['objects'] = [];
-    foreach ($leads as $lead) {
+    // We'll set apart invalid leads, and make sure they have numeric indices;
+    // we'll continue sending an API call with only the valid ones.
+    $invalid_leads = [];
+    $leads = array_values($leads);
+    foreach ($leads as $index => $lead) {
+
       if (!is_array($lead) && !(is_object($lead) && $lead instanceof Lead)) {
-        throw new \InvalidArgumentException("At least one of the arguments to $method() is not a lead.");
+        $invalid_leads[$index] = [ 'success' => FALSE, 'error' => [
+          'code' => 1, 'message' => 'Invalid argument; not a lead.', 'data' => $lead
+        ]];
+        continue;
       }
       $lead = $this->toArray('lead', $lead);
 
-      if (isset($lead['emailAddress'])) {
-        if (!filter_var($lead['emailAddress'], FILTER_VALIDATE_EMAIL)) {
-          // The REST API will happily insert bogus e-mails but we won't let
-          // that happen.
-          throw new \InvalidArgumentException("Lead has invalid e-mail address $lead[emailAddress]");
+      if (empty($lead['emailAddress'])) {
+        if ($method === 'createLeads') {
+          $invalid_leads[$index] = [ 'success' => FALSE, 'error' => [
+            'code' => 2, 'message' => 'Missing e-mail address', 'data' => []
+          ]];
+          continue;
+        }
+        elseif (empty($lead['id'])) {
+          // The REST API would not catch this and return success without
+          // updating anything. See updateLead() for comments.
+          $invalid_leads[$index] = [ 'success' => FALSE, 'error' => [
+            'code' => 2, 'message' => "Missing e-mail address, and no ID. Updating won't work.", 'data' => []
+          ]];
+          continue;
         }
       }
-      elseif ($method === 'createLeads') {
-        throw new \InvalidArgumentException("Lead has no e-mail address.");
-      }
-      elseif (empty($lead['id'])) {
-        // The REST API would not catch this and return success without
-        // updating anything. See updateLead() for comments.
-        throw new \InvalidArgumentException("Lead has no e-mail address and no ID; updating it won't work.");
+      elseif (!filter_var($lead['emailAddress'], FILTER_VALIDATE_EMAIL)) {
+        // The REST API will happily insert bogus e-mails but we won't let that
+        // happen.
+        $invalid_leads[$index] = [ 'success' => FALSE, 'error' => [
+          'code' => 3, 'message' => 'Invalid e-mail address.', 'data' => [
+            // We won't try to mimic the data structure from a REST API error
+            // here; for invalid parameters it seems to often return a
+            // description of the needed structure, but not the value that was
+            // deemed invalid - which we will do here.
+            // I don't know if it makes sense to do it like this.
+            'emailAddress' => $lead['emailAddress']
+        ]]];
+        continue;
       }
 
       // Just a note: alphanumeric keys could be provided to the REST API
@@ -1081,28 +1122,85 @@ class SharpSpringRestClient {
       // in case errors are encountered, and it's a bit too much trouble.
       $params['objects'][] = $lead;
     }
-    $response_checks = [
-      'single_result_key' => $method === 'createLeads' ? 'creates' : 'updates',
-      'validate_result_with_objects' => TRUE,
-      'throw_for_individual_object' => $throw_for_individual_object,
-    ];
-    return $params['objects'] ? $this->exec($method, $params, $response_checks) : [];
+
+    $result = [];
+    if ($params['objects']) {
+      $response_checks = [
+        'single_result_key' => $method === 'createLeads' ? 'creates' : 'updates',
+        'validate_result_with_objects' => TRUE,
+        'throw_for_individual_object' => $throw_for_individual_object,
+      ];
+      try {
+        $result = $this->exec($method, $params, $response_checks);
+      }
+      catch (SharpSpringRestApiException $e) {
+        if ($e->getCode() || !$e->isObjectLevel() || !$invalid_leads) {
+          // For object-level: this concerns one single object; just re-throw it
+          // as-is. (This only happens when we have one lead, so it's pretty
+          // much impossible for $invalid_leads to be non-empty.) For API-level:
+          // it's probably impossible to combine this exception with any invalid
+          // leads in a sensible way, so just disregard $invalid_leads, just
+          // like in the block below.
+          throw $e;
+        }
+        // We have a wrapper around (the API result which contains) one or more
+        // object-level errors; merge the invalid leads into it.
+        $result = $e->getData();
+      }
+      catch (\Exception $e) {
+        // Just re-throw. We are making a judgment call and disregarding any
+        // invalid leads (that would be in $invalid_leads); the most likely
+        // situation here is an exception from the actual REST client, which would
+        // be harder to debug if we wrapped it into another exception.
+        throw $e;
+      }
+    }
+    if ($invalid_leads) {
+      // We have invalid leads which we turned into faux object errors; throw an
+      // exception for them.
+      if ($result) {
+        // But first, merge them together with actual object errors returned
+        // from the API. Preserve original order, otherwise the caller cannot
+        // see the link between input argument and error.
+        $index = 0;
+        $object_errors = [];
+        while ($invalid_leads) {
+          if (isset($invalid_leads[$index])) {
+            $object_errors[] = $invalid_leads[$index];
+            unset($invalid_leads[$index]);
+          }
+          else {
+            // $invalid_leads plus $result should add up to the number of input
+            // arguments, so there should be an object left in here.
+            $object_errors[] = array_shift($result);
+          }
+          $index++;
+        }
+        // Any items still remaining in $result are added at the end.
+        $result = array_merge($object_errors, $result);
+      }
+      else {
+        $result = $invalid_leads;
+      }
+      throw new SharpSpringRestApiException("$method call yielded at least one faux object-level error", 0, $result, TRUE);
+    }
+
+    return $result;
   }
 
   /**
-   * Create a Lead object.
-   *
-   * About behavior: if a lead with the same e-mail address already exists, an
-   * error (code 301, message "Entry already exists") will be returned. (Which
-   * will cause an object-level SharpSpringRestApiException to be thrown.)
+   * Creates a Lead object.
    *
    * The 'id' value will be ignored; a new object is always created (given no
    * other errors).
    *
-   * If an object-level error is encountered, the SharpSpringRestApiException's
-   * message / code will be that from the REST API (whereas a createLeads() call
-   * for one object will throw a generic SharpSpringRestApiException with code
-   * 0 that wraps the actual error).
+   * If a lead with the same e-mail address already exists, the API returns an
+   * error (code 301, message "Entry already exists"). (Which will cause an
+   * object-level SharpSpringRestApiException to be thrown.)
+   *
+   * If an object-level error is encountered, the behavior is somewhat different
+   * than when calling createLeads() with a single lead; the errors in the
+   * SharpSpringRestApiException are more directly accessible.
    *
    * @param \SharpSpring\RestApi\Lead|array $lead
    *   A lead. (Both actual Lead objects and arrays are accepted.)
@@ -1110,11 +1208,11 @@ class SharpSpringRestClient {
    * @return array
    *    [ 'success': TRUE, 'error': NULL, 'id': <ID OF THE CREATED LEAD> ]
    *
-   * @throws \InvalidArgumentException
-   *   If the e-mail address is invalid.
    * @throws SharpSpringRestApiException
    *   If the REST API indicated that the lead failed to be created.
-   *   isObjectLevel() tells whether it's an API-level or object-level error.
+   *   isObjectLevel() tells whether it's an API-level or object-level error;
+   *   for object-level errors, getCode() and getMessage() return the values
+   *   from the API response (unlike with getLeads(), which returns a wrapper).
    * @throws \UnexpectedValueException
    *   If the REST API response has an unexpected format. (Since documentation
    *   is terse, this library does strict checks so that we're sure we do not
@@ -1122,23 +1220,22 @@ class SharpSpringRestClient {
    * @throws \RuntimeException
    *   If the request to the REST API fails.
    */
-// @TODO check whether this works and can throw an object-level error.
   public function createLead($lead) {
     $result = $this->handleLeads([$lead], 'createLeads', TRUE);
-    // Now we know $result is a single-element array. Return the single object
-    // result inside.
+    // If execution returns here, we know $result is a single-element array.
+    // Return the single object result inside.
     return reset($result);
   }
 
   /**
-   * Create one or more Lead objects in a single REST API call.
+   * Creates one or more Lead objects in a single REST API call.
    *
    * Does nothing and returns empty array if an empty array is provided.
    *
    * About behavior: if a lead with the same e-mail address already exists, an
-   * error (code 301, message "Entry already exists") will be returned. (Which
-   * will cause a SharpSpringRestApiException to be thrown with code 0, and the
-   * 301 error inside the object-level data.)
+   * object-level error (code 301, message "Entry already exists") will be
+   * returned. (See below about how object-level errors are wrapped inside a
+   * SharpSpringRestApiException with code 0.)
    *
    * 'id' values in a lead object are ignored; a new object is always created
    * (given no other errors).
@@ -1147,18 +1244,17 @@ class SharpSpringRestClient {
    *   Leads. (Both actual Lead objects and arrays are accepted).
    *
    * @return array
-   *   The API call result, which should be an array of sub-arrays for each lead
-   *   each structured like [ 'success': TRUE, 'error': NULL, 'id': <NEW ID> ]
+   *   The (somewhat shortened) API call result, which should be an array with
+   *   as many values as there are leads in the input argument, each being an
+   *   array structured like [ 'success': TRUE, 'error': NULL, 'id': <NEW ID> ]
    *
-   * @throws \InvalidArgumentException
-   *   If the input values are not all Leads or one of them has an invalid
-   *   e-mail address.
    * @throws SharpSpringRestApiException
-   *   If the REST API indicated that the lead failed to be created.
-   *   isObjectLevel() tells whether it's an API-level or object-level error; if
-   *   it's true, the code will be 0 and getData() will return data for each
-   *   processed object, containing success or the actual error code / message
-   *   / data. See getData() for more details.
+   *   If the REST API indicated that at least one lead failed to be created.
+   *   isObjectLevel() tells whether it's an API-level or object-level error;
+   *   for object level errors, getCode() is 0 and getData() returns an array
+   *   with as many values as there were leads in the input argument, containing
+   *   success or the actual error code / message / data. See
+   *   SharpSpringRestApiException::getData() for more details.
    * @throws \UnexpectedValueException
    *   If the REST API response has an unexpected format. (Since documentation
    *   is terse, we do strict checks so that we're sure we do not ignore unknown
@@ -1171,7 +1267,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Update a lead object.
+   * Updates a lead object.
    *
    * The lead object to be updated can be recognized by its id or emailAddress
    * property. In other words;
@@ -1209,10 +1305,10 @@ class SharpSpringRestClient {
    * seeing if the e-mail is actually the value you expect. If not, you should
    * assume the update silently failed.
    *
-   * If an object-level error is encountered, the SharpSpringRestApiException's
-   * message / code will be that from the REST API (whereas a createLeads() call
-   * for one object will throw a generic SharpSpringRestApiException with code
-   * 0 that wraps the actual error).
+   * If an object-level error is encountered, the behavior is somewhat different
+   * than when calling createLeads() with a single lead; the errors in the
+   * SharpSpringRestApiException are more directly accessible. See the relevant
+   * docs at createLead() vs createLeads().
    *
    * @param \SharpSpring\RestApi\Lead|array $lead
    *   A lead. (Both actual Lead objects and arrays are accepted.)
@@ -1222,8 +1318,6 @@ class SharpSpringRestClient {
    *   much use at the moment but is kept like this in case the REST API
    *   extends its functionality, like createLead where it returns extra info.)
    *
-   * @throws \InvalidArgumentException
-   *   If the lead has an invalid e-mail address or no address/id.
    * @throws SharpSpringRestApiException
    * @throws \UnexpectedValueException
    * @throws \RuntimeException
@@ -1231,31 +1325,30 @@ class SharpSpringRestClient {
    * @see createLead()
    *
    * @todo implement some 'fix' option (in 2nd array-argument) to fix the 302 ?
-   * @todo check what updateLeads() does with one updatable item and one no-op.
    */
   public function updateLead($lead) {
-    // See createLead() for code comments.
     $result = $this->handleLeads([$lead], 'updateLeads', TRUE);
+    // If execution returns here, we know $result is a single-element array.
+    // Return the single object result inside.
     return reset($result);
   }
 
   /**
-   * Update one or more Lead objects in a single REST API call.
+   * Updates one or more Lead objects in a single REST API call.
    *
    * Does nothing and returns empty array if an empty array is provided.
    *
-   * See updateLead() documentation for caveats.
+   * See updateLead() documentation for caveats. Note: object-level errors 302
+   * are returned for each individual lead that is not changed.
    *
    * @param array $leads
    *   Leads. (Both actual Lead objects and arrays are accepted).
    *
    * @return array
-   *   The API call result, which should be an array of fixed values for each
-   *   lead: [ 'success': TRUE, 'error': NULL ]
+   *   The (somewhat shortened) API call result, which should be an array with
+   *   as many values as there are leads in the input argument, each being a
+   *   fixed array value: [ 'success': TRUE, 'error': NULL ]
    *
-   * @throws \InvalidArgumentException
-   *   If the input values are not all Leads or one of them has an invalid
-   *   e-mail address or no address/id.
    * @throws SharpSpringRestApiException
    * @throws \UnexpectedValueException
    * @throws \RuntimeException
@@ -1266,17 +1359,29 @@ class SharpSpringRestClient {
    */
   public function updateLeads(array $leads) {
     return $this->handleLeads($leads, 'updateLeads');
-//@TODO check.
   }
 
   /**
-   * Delete a single lead identified by id.
+   * Deletes a single lead.
    *
-   * @param string $id
+   * If an object-level error is encountered, the behavior is somewhat different
+   * than when calling deleteLeads() with a single lead; the errors in the
+   * SharpSpringRestApiException are more directly accessible. See the relevant
+   * docs at createLead() vs createLeads().
    *
-   * @return true
+   * @param int $id
+   *   The ID of the lead.
    *
-   * @TODO document throws here? in deleteLeads() too?
+   * @return array
+   *   A fixed value: [ 'success': TRUE, 'error': NULL ]. (The value is not
+   *   much use at the moment but is kept like this in case the REST API
+   *   extends its functionality, like createLead where it returns extra info.)
+   *
+   * @throws SharpSpringRestApiException
+   * @throws \UnexpectedValueException
+   * @throws \RuntimeException
+   *
+   * @see createLead()
    */
   public function deleteLead($id) {
     $params['objects'] = [];
@@ -1286,23 +1391,28 @@ class SharpSpringRestClient {
       'validate_result_with_objects' => TRUE,
       'throw_for_individual_object' => TRUE,
     ]);
+    // If execution returns here, we know $result is a single-element array.
+    // Return the single object result inside.
     return reset($result);
-//@TODO test. And what does this return exactly? Is this an array now?
   }
 
   /**
-   * Delete multiple leads identified by id.
+   * Deletes multiple leads identified by id.
    *
    * Does nothing and returns empty array if an empty array is provided.
    *
-   * @param string[] $ids
+   * @param int[] $ids
    *
    * @return array
-   *   An array of results per object; each result has two keys: 'success'
-   *   (boolean) and 'error' (NULL or an array containing error specification).
+   *   The (somewhat shortened) API call result, which should be an array with
+   *   as many values as there are leads in the input argument, each being a
+   *   fixed array value: [ 'success': TRUE, 'error': NULL ]
    *
-@TODO TEST: one  good delete, one bad one. Check if the new validation works.
+   * @throws SharpSpringRestApiException
+   * @throws \UnexpectedValueException
+   * @throws \RuntimeException
    *
+   * @see createLeads()
    */
   public function deleteLeads(array $ids) {
     if (!$ids) {
@@ -1322,7 +1432,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a single Lead by its ID.
+   * Retrieves a single Lead by its ID.
    *
    * Some standard string fields returned from the API (e.g. title, street)
    * contain NULL values by default (unlike the custom fields which contain an
@@ -1336,14 +1446,13 @@ class SharpSpringRestClient {
    *    internally, because updating a NULL value to '' won't return an
    *    object-level error 302 "No table rows affected".)
    *
-   * @param string $id
-   *   The lead's ID. (It's actually a numeric string but 12 digits, so not an
-   *   int.)
+   * @param int $id
+   *   The lead's ID.
    * @param array $options
    *   (optional) One option key is recognized so far: 'fix_empty_leads'. If set
    *   to a 'true' value, then return an empty array if the lead returned from
    *   the REST API contains no 'id' value. Reason: (as of API v1.117, 20170127)
-   *   queries for a nonexistent lead will return an array with values
+   *   queries for a nonexistent lead *may* return an array with values
    *   leadStatus = open, and all custom fields with an empty value; no other
    *   values. This class chooses to not alter return values by default
    *   (because who knows what hidden problems that could cause), in the hope
@@ -1354,7 +1463,7 @@ class SharpSpringRestClient {
    *
    * @return array
    *   A lead structure (in array format as returned from the REST API; not as
-   *   a Lead object).
+   *   a Lead object). Empty array if not found.
    *
    * @todo here and in getLeads, do a 'fix' property to convert nulls to empty
    *   strings for non-nullable values?
@@ -1363,20 +1472,28 @@ class SharpSpringRestClient {
     $params['id'] = $id;
     $leads = $this->exec('getLead', $params, ['single_result_key' => 'lead']);
     // For some reason getLead returns an array of exactly one leads. Not sure
-    // why that is useful. We'll just return one lead - but then we need to
+    // why that is useful. We'll just return the lead - but then we need to
     // first validate that we have exactly one.
     if (count($leads) > 1) {
       throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'lead' value contains more than one object.'\nResponse: " . json_encode($leads), 16);
     }
-    $lead = reset($leads);
-    if (!empty($options['fix_empty_leads']) && !isset($lead['id'])) {
+    if ($leads) {
+      $lead = reset($leads);
+      if (!empty($options['fix_empty_leads']) && !isset($lead['id'])) {
+        $lead = [];
+      }
+    }
+    else {
+      // If not found *and* the 'custom fields' bug is not encountered, an empty
+      // array is returned. In this case we won't 'unwrap' it (to return NULL or
+      // FALSE), but just return an empty array.
       $lead = [];
     }
     return $lead;
   }
 
   /**
-   * Gets a number of lead objects.
+   * Retrieves a number of lead objects.
    *
    * @param array $where
    *   A key-value array containing ONE item only, with key being either 'id' or
@@ -1384,12 +1501,14 @@ class SharpSpringRestClient {
    *  value will be one lead only, and will also return the corresponding lead
    *  if it is inactive. If this parameter is not provided, only active leads
    *  are returned.
-   * @param null $limit
-   *   A limit to the number of objects returned.
-   * @param null $offset
-   *   The index in the full list of objects, of the first object to return.
-   *   Zero-based. (To reiterate: this number is 'object based', not 'batch/page
-   *   based.)
+   * @param int $limit
+   *   (optional) A limit to the number of objects returned. A higher number
+   *   than 500 does not have effect; the number of objects returned will be 500
+   *   maximum.
+   * @param int $offset
+   *   (optional) The index in the full list of objects, of the first object to
+   *   return. Zero-based. (To reiterate: this number is 'object based', not
+   *   'batch/page based'.)
    * @param array $options
    *   (optional) One option key is recognized so far: 'fix_empty_leads'. See
    *   getLead().
@@ -1416,13 +1535,17 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a list of Leads that were created or updated in a timeframe.
+   * Retrieves Leads that were created or updated in a given time frame.
    *
    * Please note the returned updateTimestamp value for the leads is expressed
-   * in UTC, while the getLead() / getLeads() calls it is in the local timezone.
+   * in UTC, while the getLead() / getLeads() calls return the value expressed
+   * in the local timezone (however this may be determined).
    *
    * If a lead was updated to be inactive, it is still part of the 'update'
    * dataset retrieved by this call.
+   *
+   * Warning: the number of leads returned is capped at 500 by default. Luckily
+   * this call also has (undocumented) 'limit' and 'offset' parameters.
    *
    * @param string $start_date
    *   Start of date range; format Y-m-d H:i:s, assuming UTC.
@@ -1431,27 +1554,36 @@ class SharpSpringRestClient {
    *   to 'now'.
    * @param $time_type
    *   (optional) The field to filter for dates: 'update' (default) or 'create'.
+   *   (For completeness: leads which have been created once and never updated
+   *   afterwards, are also returned in the 'update' list. This is obviously the
+   *   logical thing to do; it's just being noted here because at least one
+   *   other competitor's REST API does _not_ do this...)
+   * @param int $limit
+   *   (optional) A limit to the number of objects returned. The default is set
+   *   to 500, but (unlike with getLeads()) it can be raised beyond 500.
+   * @param int $offset
+   *   (optional) The index in the full list of objects, of the first object to
+   *   return. Zero-based.
    *
    * @return array
    *   An array of Lead structures.
    *
    * @see Lead::$updateTimestamp
    */
-  public function getLeadsDateRange($start_date, $end_date = '', $time_type = 'update') {
+  public function getLeadsDateRange($start_date, $end_date = '', $time_type = 'update', $limit = NULL, $offset = NULL) {
     $params['startDate'] = $start_date;
     $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
     $params['timestamp'] = $time_type;
-// @todo do this better and implement it. (Also: this can go to >3500 so is there really a 500 limit to getLeads? Re-test, and doc.)
-    $params['limit'] = 5000;
-//    $params['offset'] = 600;
-    return $this->exec('getLeadsDateRange', $params, ['single_result_key' => 'lead']);
+    return $this->execLimitedQuery('getLeadsDateRange', 'lead', [], $limit, $offset, $params);
   }
 
   /**
-   * Get a list of fields.
+   * Retrieves a list of fields.
    *
    * @param int $limit
-   * @param int  $offset
+   *   (optional) Limit.
+   * @param int $offset
+   *   (optional) Offset.
    *
    * @return array
    *   An array of Field structures. (Note: no 'hasMore' indicator.)
@@ -1461,7 +1593,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a single Account by its ID.
+   * Retrieves a single Account by its ID.
    *
    * @param int $id
    *
@@ -1470,21 +1602,25 @@ class SharpSpringRestClient {
    */
   public function getAccount($id) {
     $params['id'] = $id;
-    return $this->exec('getAccount', $params, ['single_result_key' => 'account']);
+    $result = $this->exec('getAccount', $params, ['single_result_key' => 'account']);
+    // For some reason getAccount returns an array of exactly one accounts.
+    if (count($result) > 1) {
+      throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'account' value contains more than one object.'\nResponse: " . json_encode($result), 16);
+    }
+    return reset($result);
   }
 
   /**
-   * Retrieve a list of Accounts given a WHERE clause,
-   * or retrieve all Accounts if WHERE clause is empty.
+   * Retrieves a number of Account objects.
    *
    * @param array $where
-   *   Conditions
+   *   (optional) Conditions
    *   - id
    *   - ownerID
    * @param int $limit
-   *   Limit.
+   *   (optional) Limit.
    * @param int $offset
-   *   Offset.
+   *   (optional) Offset.
    *
    * @return mixed
    *   An array of Account structures. (Note: no 'hasMore' indicator.)
@@ -1494,7 +1630,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a list of Accounts that were created or updated in a timeframe.
+   * Retrieves Accounts that were created or updated in a given time frame.
    *
    * @param string $start_date
    *   Start of date range; format Y-m-d H:i:s, assuming UTC (not tested).
@@ -1517,7 +1653,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a single Campaign by its ID.
+   * Retrieves a single Campaign by its ID.
    *
    * @param int $id
    *   The campaign ID.
@@ -1526,21 +1662,25 @@ class SharpSpringRestClient {
    */
   public function getCampaign($id) {
     $params['id'] = $id;
-    return $this->exec('getCampaign', $params, ['single_result_key' => 'campaign']);
+    $result = $this->exec('getCampaign', $params, ['single_result_key' => 'campaign']);
+    // For some reason getCampaign returns an array of exactly one accounts.
+    if (count($result) > 1) {
+      throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'campaign' value contains more than one object.'\nResponse: " . json_encode($result), 16);
+    }
+    return reset($result);
   }
 
   /**
-   * Retrieve a list of Campaigns given a WHERE clause,
-   * or retrieve all Campaigns if WHERE clause is empty.
+   * Retrieves a number of Campaign objects.
    *
    * @param array $where
-   *   Conditions
+   *   (optional) Conditions
    *   - id
    *   - ownerID
    * @param int $limit
-   *   Limit.
+   *   (optional) Limit.
    * @param int $offset
-   *   Offset.
+   *   (optional) Offset.
    *
    * @return array
    *   An array of Campaign structures. (Note: no 'hasMore' indicator.)
@@ -1550,7 +1690,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a list of Campaigns that have been created/updated in a timeframe.
+   * Retrieves Campaigns that were created or updated in a given time frame.
    *
    * @param string $start_date
    *   Start of date range; format Y-m-d H:i:s, assuming UTC (not tested).
@@ -1573,7 +1713,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Get a list of all active companies managed by your company.
+   * Retrieves a list of all active companies managed by your company.
    *
    * @return array
    * Result with 2 keys:
@@ -1588,7 +1728,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a single DealStage by its ID.
+   * Retrieves a single Deal Stage by its ID.
    *
    * @param int $id
    *
@@ -1598,21 +1738,25 @@ class SharpSpringRestClient {
   public function getDealStage($id) {
     $params['id'] = $id;
     $result = $this->exec('getDealStage', $params, ['single_result_key' => 'dealStage']);
+    // For some reason getDealStage returns an array of exactly one deal stages.
+    if (count($result) > 1) {
+      throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'dealStage' value contains more than one object.'\nResponse: " . json_encode($result), 16);
+    }
+    return reset($result);
   }
 
 
   /**
-   * Retrieve a list of DealStage objects given a WHERE clause,
-   * or retrieve all DealStage objects if WHERE clause is empty.
+   * Retrieves a number of Deal Stage objects.
    *
    * @param array $where
-   *   Conditions
+   *   (optional) Conditions
    *   - id
    *   - ownerID
    * @param int $limit
-   *   Limit.
+   *   (optional) Limit.
    * @param int $offset
-   *   Offset.
+   *   (optional) Offset.
    *
    * @return array
    *   An array of DealStage structures.
@@ -1622,7 +1766,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Retrieve a list of DealStages that were created or updated in a timeframe.
+   * Retrieves DealStages that were created or updated in a given time frame.
    *
    * @param string $start_date
    *   Start of date range; format Y-m-d H:i:s, assuming UTC (not tested).
@@ -1639,13 +1783,13 @@ class SharpSpringRestClient {
    */
   public function getDealStagesDateRange($start_date, $end_date = '', $time_type = 'update') {
     $params['startDate'] = $start_date;
-    $params['endDate'] = $end_date;
     $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
+    $params['timestamp'] = $time_type;
     return $this->exec('getDealStagesDateRange', $params, ['single_result_key' => 'dealStage']);
   }
 
   /**
-   * Returns a list of active Lists.
+   * Retrieves a list of active Lists.
    *
    * As of v1.1.17, the API documentation says that the 'where' parameter is
    * "optional", whereas in other places it says "required" (even when it may be
@@ -1654,6 +1798,10 @@ class SharpSpringRestClient {
    *
    * @param int $id
    *   (optional) List ID.
+   * @param int $limit
+   *   (optional) Limit.
+   * @param int $offset
+   *   (optional) Offset.
    *
    * @return array
    *   An array of List structures.
@@ -1668,17 +1816,16 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Returns the active members for a specific list
+   * Retrieves the active members for a specific list
    *
    * @param int $id
    *   List ID. Unknown values will not return a validation error; they will
    *   just make the method return an empty list.
-   * @param null $limit
-   *   A limit to the number of objects returned.
-   * @param null $offset
-   *   The index in the full list of objects, of the first object to return.
-   *   Zero-based. (To reiterate: this number is 'object based', not 'batch/page
-   *   based.)
+   * @param int $limit
+   *   (optional) A limit to the number of objects returned.
+   * @param int $offset
+   *   (optional) The index in the full list of objects, of the first object to
+   *   return. Zero-based.
    *
    * @return array
    * Result with 2 keys:
@@ -1693,7 +1840,7 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Get the members that are removed from a list.
+   * Retrieves the members that are removed from a list.
    *
    * @param int $id
    *   List ID. Unknown values will not return a validation error; they will
@@ -1702,12 +1849,11 @@ class SharpSpringRestClient {
    *   (optional) "removed", "unsubscribed" or "hardbounced". The REST API will
    *   default to returning "removed" members. Unknown values will not return
    *   a validation error; they will just make the method return an empty list.
-   * @param null $limit
-   *   A limit to the number of objects returned.
-   * @param null $offset
-   *   The index in the full list of objects, of the first object to return.
-   *   Zero-based. (To reiterate: this number is 'object based', not 'batch/page
-   *   based.)
+   * @param int $limit
+   *   (optional) A limit to the number of objects returned.
+   * @param int $offset
+   *   (optional) The index in the full list of objects, of the first object to
+   *   return. Zero-based.
    *
    * @return array
    *   Same format as getListMembers.
