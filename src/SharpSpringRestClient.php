@@ -116,9 +116,19 @@ class Lead extends ValueObject {
   /**
    * Lead Status.
    *
-   * Possible values: 'unqualified', 'open', 'qualified', 'contact'. Leaving
-   * this empty when creating a contact will set it to 'unqualified'. Other
-   * values will have the REST API return an error.
+   * Possible values (as currently known):
+   * - unqualified
+   * - open
+   * - qualified
+   * - contact
+   * - contactWithOpp: all we know about this value so far is that in the UI,
+   *   - for 'regular' contacts, it cannot be set
+   *   - if it is somehow set, a different type cannot be set.
+   *   This probably goes for the REST API too. So far we have seen that
+   *   updating a contactWithOpp to contact is impossible; the REST API will
+   *   return success but the field is not updated.
+   * Leaving this empty when creating a contact will set it to 'unqualified'.
+   * Other values will have the REST API return an error.
    *
    * @var string
    */

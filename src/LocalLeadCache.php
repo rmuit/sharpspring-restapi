@@ -377,7 +377,7 @@ class LocalLeadCache {
   }
 
   /**
-   * Compares a lead object against data in Sharpspring.
+   * Compares a lead (array or object) against data in Sharpspring.
    *
    * This can be called to see if lead data from an external system (which has
    * been converted to a lead object somehow) should be updated in Sharpspring;
@@ -387,13 +387,13 @@ class LocalLeadCache {
    *   The lead to compare, which must have at least the id, the foreign key
    *   field or the e-mail address set - because that's how they are matched.
    *   (Sharpspring cannot query by other properties so would always return an
-   *   empty array - if there no Exception was thrown.) If an array key is not
+   *   empty array - if no Exception was thrown.) If an array key is not
    *   present (or a non-nullable class property is NULL) in the input, this
    *   will not be used in comparing (just like it would not be sent in update /
    *   create calls), so a value that is only set in the corresponding
    *   Sharpspring data will not cause the comparison to fail. If it is desired
    *   to explicitly compare an empty field in a Lead input object, it should be
-   *   explicitly set to an empty string.
+   *   explicitly set to an empty string (or to NULL, for a nullable property).
    * @param bool $check_remotely
    *   (optional) If FALSE, assume our local cache is already complete and do
    *   not make a call to the Sharpspring REST API to doublecheck. In practice
@@ -404,14 +404,17 @@ class LocalLeadCache {
    *   about them).
    *
    * @return array
-   *   If the object in Sharpspring is different: that whole object. If it is
-   *   the same: a one-element array containing only 'id'. If no objects at all
-   *   could be matched (by id if provided, and otherwise by either foreign key
-   *   or by e-mail address in that order), an empty array. Therefore, same-ness
-   *   can be checked by the count() of the return value being 1. (It is
-   *   possible that this returns an empty array when there is a lead in
+   *   The 'id' value of the compared lead plus all the values in the
+   *   original object which differ from the compared input value. That is:
+   *   - an empty array means no existing leads could be matched (by id if
+   *     provided, and otherwise by either foreign key or by e-mail address in
+   *     that order)
+   *   - an array with one value means all values in the input lead are equal
+   *     to the compared existing lead, and the one value is the existing id.
+   *   - an array with more values means the input lead differs.
+   *   It is possible this method returns an empty array when there is a lead in
    *   Sharpspring with the same data... if the input lead has no ID and the
-   *   lead in Sharpspring is inactive.)
+   *   lead in Sharpspring is inactive.
    *
    * @throws \InvalidArgumentException
    *   If no IDs/email properties are set in the lead object.
@@ -450,35 +453,27 @@ class LocalLeadCache {
     $return = [];
     foreach ($leads as $sharpspring_lead) {
       // If the key exists in the 'external' lead, then we want to compare it
-      // against the Sharpspring lead (also if its value is NULL). If the
-      // corresponding key does not exist in Sharpspring, we just return FALSE.
-      // If the key does not exist in the 'external' lead, we don't care what
-      // its value is in the Sharpspring lead.
-      if (array_diff_key($external_lead, $sharpspring_lead)) {
-        // In the theoretical case of two returned -and non matching- leads,
-        // keep the first one.
-        if (!$return) {
-          $return = $sharpspring_lead;
-        }
-        continue;
-      }
-      // We can't do strict comparison of the arrays because the Sharpspring
-      // lead will in practice contain strings, also for integer values.
-      // (Because that's how the REST API returns its JSON. We don't want to
-      // depend on this staying this way forever, though.) We also can't do
-      // non-strict comparison because we want to see differences between
-      // '' and 0. So compare value by value.
+      // against the Sharpspring lead (also if its value is not set). We can't
+      // do strict comparison of the arrays because the Sharpspring lead will in
+      // practice contain strings, also for integer values. (Because that's how
+      // the REST API returns its JSON. We don't want to depend on this staying
+      // this way forever, though.) We also can't do non-strict comparison
+      // because we want to see differences between '' and 0.
+      $diff = ['id' => $sharpspring_lead['id']];
       foreach ($external_lead as $key => $value) {
-        if (isset($value) ? (string) $sharpspring_lead[$key] !== (string) $value : isset($sharpspring_lead[$key])) {
-          if (!$return) {
-            $return = $sharpspring_lead;
-          }
-          continue 2;
+        if (isset($value) != isset($sharpspring_lead[$key]) || (string) $sharpspring_lead[$key] !== (string) $value) {
+          $diff[$key] = isset($sharpspring_lead[$key]) ? $sharpspring_lead[$key] : NULL;
         }
       }
-      // Everything compares OK.
-      $return = ['id' => $sharpspring_lead['id']];
-      break;
+      if (count($diff) == 1) {
+        // Everything compares OK.
+        $return = $diff;
+        break;
+      }
+      // If there are multiple differing leads, return the first one.
+      if (!$return) {
+        $return = $diff;
+      }
     }
     return $return;
   }
