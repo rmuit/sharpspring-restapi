@@ -411,7 +411,9 @@ class LocalLeadCache {
    *     that order)
    *   - an array with one value means all values in the input lead are equal
    *     to the compared existing lead, and the one value is the existing id.
-   *   - an array with more values means the input lead differs.
+   *   - an array with more values means the input lead differs. (Careful with
+   *     using isset(), because a value is NULL if the existing lead's value is
+   *     not set.)
    *   It is possible this method returns an empty array when there is a lead in
    *   Sharpspring with the same data... if the input lead has no ID and the
    *   lead in Sharpspring is inactive.
@@ -767,7 +769,9 @@ class LocalLeadCache {
    */
   public function createLead($lead) {
     $result = $this->sharpSpringClient->createLead($lead);
-    $this->cacheLead($this->sharpSpringClient->toArray('lead', $lead));
+    $lead_array = $this->sharpSpringClient->toArray('lead', $lead);
+    $lead_array['id'] = $result['id'];
+    $this->cacheLead($lead_array);
     return $result;
   }
 
@@ -786,8 +790,10 @@ class LocalLeadCache {
     try {
       $result = $this->sharpSpringClient->createLeads($leads);
       // All leads have been successfully created.
-      foreach ($leads as $lead) {
-        $this->cacheLead($this->sharpSpringClient->toArray('lead', $lead));
+      foreach (array_values($leads) as $i => $lead) {
+        $lead_array = $this->sharpSpringClient->toArray('lead', $lead);
+        $lead_array['id'] = $result[$i]['id'];
+        $this->cacheLead($lead_array);
       }
     }
     catch (SharpSpringRestApiException $e) {
