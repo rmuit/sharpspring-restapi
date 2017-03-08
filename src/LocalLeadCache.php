@@ -151,7 +151,7 @@ class LocalLeadCache {
    *   20170127). If '-', refreshing the cache will be skipped. If '--',
    *   populating the in-memory caches will also be skipped, which means that
    *   the class will be unusable until the caller re-fetches leads using
-   *   getLeadsAll() or related functionality.
+   *   cacheAllLeads() or related functionality.
    * @param string $foreign_key
    *   (optional) The name of the foreign key field / source ID field. Leads can
    *   be retrieved by this field, though there is no guarantee that inactive
@@ -194,186 +194,8 @@ class LocalLeadCache {
 
     if ($refresh_cache_since !== '-' && $refresh_cache_since !== '--') {
       // Populate or complete the cache.
-      $this->getLeadsAll($refresh_cache_since);
+      $this->cacheAllLeads($refresh_cache_since);
     }
-  }
-
-  /**
-   * Retrieves and caches all active leads from Sharpspring.
-   *
-   * NOTE: The updateTimestamp value differs if we fetch it using getLeads vs.
-   * getLeadsDateRange, so do not trust the value of the property on the Lead
-   * objects! (It's expressed in local timezone vs. UTC, respectively. We could
-   * convert it, but it's not exactly clear how "local timezone" is defined.)
-   *
-   * @param string $since
-   *   If empty, this method will clear the local cache and read / cache all
-   *   (active) leads from the Sharpspring account. If set to a time (string
-   *   representation in format Y-m-d H:i:s), only the updates since then will
-   *   be read and cached on top of the current contents of the cache. The time
-   *   has no timezone specification but is in UTC (tested on API v1.117,
-   *   20170127).
-   */
-  public function getLeadsAll($since) {
-    if (!$since) {
-      $this->keyValueStore->deleteAll();
-      $this->propertyCache = $this->sharpspringIdsByForeignKey = $this->sharpspringIdsByEmail = [];
-    }
-
-    $offset = 0;
-    do {
-      $leads = $since
-        ? $this->getLeadsDateRange($since, '', 'update', static::LEADS_GET_LIMIT, $offset)
-        : $this->getLeads([], static::LEADS_GET_LIMIT, $offset);
-      $offset = count($leads) == static::LEADS_GET_LIMIT ? $offset + static::LEADS_GET_LIMIT : 0;
-    } while ($offset);
-  }
-
-  /**
-   * Retrieves a lead (array, not object), from the key-value store or remotely.
-   *
-   * If fetched remotely, the lead is cached in the key-value store and the
-   * in-memory cache is updated. This can be important for fetching inactive
-   * leads which getLeadsAll() does not do.
-   *
-   * NOTE: The updateTimestamp value is unreliable; it may be expressed in local
-   * time or UTC! See getLeadsAll().
-   *
-   * @param int $sharpspring_id
-   *   The lead's ID in Sharpspring.
-   * @param bool $check_remotely
-   *   (optional) If FALSE, assume our local cache is already complete and do
-   *   not make a call to the Sharpspring REST API to doublecheck. Default TRUE.
-   *   (because if the caller has a Sharpspring ID, it probably knows what it's
-   *   doing and we'll assume that if we don't have it cached here, that may be
-   *   because it's inactive. Or worse, the key-value cache is out of date).
-   *
-   * @return array
-   *   A lead structure; empty array means this ID does not exist.
-   */
-  public function getLead($sharpspring_id, $check_remotely = TRUE) {
-    $lead = $this->keyValueStore->get($sharpspring_id, []);
-
-    if (!$lead && $check_remotely) {
-      $lead = $this->getLeadRemote($sharpspring_id);
-      if (!empty($lead['active'])) {
-        $this->log('notice', 'Sharpspring object {id} was just retrieved remotely and is active. Apparently the local cache is out of date.', ['id' => $sharpspring_id]);
-      }
-    }
-
-    return $lead;
-  }
-
-  /**
-   * Retrieves lead(s) (arrays, not objects) by e-mail address.
-   *
-   * If fetched remotely, the lead is cached in the key-value store and the
-   * in-memory cache is updated. This can be important for fetching inactive
-   * leads which getLeadsAll() does not do.
-   *
-   * NOTE: The updateTimestamp value is unreliable; it may be expressed in local
-   * time or UTC! See getLeadsAll().
-   *
-   * @param string $email
-   *   The e-mail address.
-   * @param bool $check_remotely
-   *   (optional) If FALSE, assume our local cache is already complete and do
-   *   not make a call to the Sharpspring REST API to doublecheck.
-   *
-   * @return array
-   *   Zero or more lead structures. (It really should be maximum 1 because we
-   *   cannot update a second lead to the same e-mail address. But who knows
-   *   what Sharpspring is capable of - the documentation does not specify it
-   *   and it accepts bogus e-mail addresses - so we won't make guarantees
-   *   about the API result.)
-   */
-  public function getLeadsByEmail($email, $check_remotely = TRUE) {
-    $ids = !empty($this->sharpspringIdsByEmail[$email]) ? $this->sharpspringIdsByEmail[$email] : [];
-
-    $leads = [];
-    if ($ids) {
-      foreach ($ids as $id) {
-        // We assume this never does a remote call because our in-memory lookup
-        // caches are in sync with our key-value store data.
-        $lead = $this->getLead($id);
-        if ($lead) {
-          $leads[] = $lead;
-        }
-        else {
-          $this->log('error', 'LocalLeadCache internal error: Sharpspring object {id} not found, while its id was cached by e-mail {email}.', ['id' => $id, 'email' => $email]);
-        }
-      }
-    }
-    elseif ($check_remotely) {
-      $leads = $this->getLeads(['emailAddress' => $email]);
-      foreach ($leads as $lead) {
-        if (!empty($lead['active'])) {
-          $this->log('notice', 'Sharpspring object with e-mail {email} ({id}) was just retrieved remotely and is active. Apparently the local cache is out of date.', ['id' => $lead['id'], 'email' => $email]);
-        }
-      }
-    }
-
-    return $leads;
-  }
-
-  /**
-   * Retrieves lead(s) (arrays, not objects) by foreign key ID.
-   *
-   * Only retrieves leads which are known in the in-memory cache. Therefore,
-   * does not necessarily return inactive leads.
-   *
-   * @param string $foreign_key_id
-   *   The 'foreign key ID' from a remote system.
-   *
-   * @return array
-   *   Zero or more lead structures. (Hopefully either 0 or 1.)
-   */
-  public function getLeadsByForeignKey($foreign_key_id) {
-    $ids = !empty($this->sharpspringIdsByForeignKey[$foreign_key_id]) ? $this->sharpspringIdsByForeignKey[$foreign_key_id] : [];
-    $leads = [];
-    foreach ($ids as $id) {
-      $lead = $this->getLead($id);
-      if ($lead) {
-        $leads[] = $lead;
-      }
-      else {
-        $this->log('error', 'LocalLeadCache internal error: Sharpspring object {id} not found, while its id was cached by foreign key ID {fkey_id}.', ['id' => $id, 'fkey_id' => $foreign_key_id]);
-      }
-    }
-
-    return $leads;
-  }
-
-  /**
-   * Returns property value for a Sharpspring lead.
-   *
-   * @param string $property
-   *   Property name.
-   * @param int $sharpspring_id
-   *   The lead's ID in Sharpspring.
-   * @param bool $check_remotely
-   *   (optional) If FALSE, assume our local cache is already complete and do
-   *   not make a call to the Sharpspring REST API to doublecheck. Default TRUE
-   *   (because if the caller has a Sharpspring ID, it probably knows what it's
-   *   doing and we'll assume that if we don't have it cached here, that may be
-   *   because it's inactive. Or worse, the key-value cache is out of date).
-   *
-   * @return mixed
-   *   The value, or NULL if the property does not exist in the item OR if the
-   *   item does not exist.
-   */
-  public function getPropertyValue($property, $sharpspring_id, $check_remotely = TRUE) {
-    if (isset($this->propertyCache[$sharpspring_id])) {
-      $key = array_search($property, $this->cachedProperties, TRUE);
-      if ($key !== FALSE) {
-        // Get value from in-memory cache; if it isn't there, then get remotely.
-        return isset($this->propertyCache[$sharpspring_id][$key]) ? $this->propertyCache[$sharpspring_id][$key] : NULL;
-      }
-    }
-
-    // Get value from key-value store, or remotely.
-    $lead = $this->getLead($sharpspring_id, $check_remotely);
-    return isset($lead[$property]) ? $lead[$property] : NULL;
   }
 
   /**
@@ -481,179 +303,150 @@ class LocalLeadCache {
   }
 
   /**
-   * Caches a lead's data in the in-memory cache and key-value store.
+   * Returns property value for a Sharpspring lead.
    *
-   * @param array $lead_array
-   *   A lead as retrieved from Sharpspring, in array format (not Lead object).
+   * @param string $property
+   *   Property name.
+   * @param int $sharpspring_id
+   *   The lead's ID in Sharpspring.
+   * @param bool $check_remotely
+   *   (optional) If FALSE, assume our local cache is already complete and do
+   *   not make a call to the Sharpspring REST API to doublecheck. Default TRUE
+   *   (because if the caller has a Sharpspring ID, it probably knows what it's
+   *   doing and we'll assume that if we don't have it cached here, that may be
+   *   because it's inactive. Or worse, the key-value cache is out of date).
+   *
+   * @return mixed
+   *   The value, or NULL if the property does not exist in the item OR if the
+   *   item does not exist.
    */
-  protected function cacheLead(array $lead_array) {
-    if (empty($lead_array['id'])) {
-      $this->log('critical', "LocalLeadCache internal coding error: Sharpspring object {object} has no 'id' parameter in cacheLead().", ['object' => isset($lead_array['emailAddress']) ? $lead_array['emailAddress'] : json_encode($lead_array)]);
+  public function getPropertyValue($property, $sharpspring_id, $check_remotely = TRUE) {
+    if (isset($this->propertyCache[$sharpspring_id])) {
+      $key = array_search($property, $this->cachedProperties, TRUE);
+      if ($key !== FALSE) {
+        // Get value from in-memory cache; if it isn't there, then get remotely.
+        return isset($this->propertyCache[$sharpspring_id][$key]) ? $this->propertyCache[$sharpspring_id][$key] : NULL;
+      }
     }
-    else {
-      $this->updateMemoryCaches($lead_array);
-      $this->keyValueStore->set($lead_array['id'], $lead_array);
-    }
+
+    // Get value from key-value store, or remotely.
+    $lead = $this->getLead($sharpspring_id, $check_remotely);
+    return isset($lead[$property]) ? $lead[$property] : NULL;
   }
 
   /**
-   * Updates a lead's data in the in-memory cache.
+   * Retrieves lead(s) (arrays, not objects) by e-mail address.
    *
-   * @param array $lead_array
-   *   A lead as retrieved from Sharpspring, in array format (not Lead object).
+   * If fetched remotely, the lead is cached in the key-value store and the
+   * in-memory cache is updated. This can be important for fetching inactive
+   * leads which cacheAllLeads() does not do.
+   *
+   * NOTE: The updateTimestamp value is unreliable; it may be expressed in local
+   * time or UTC! See cacheAllLeads().
+   *
+   * @param string $email
+   *   The e-mail address.
+   * @param bool $check_remotely
+   *   (optional) If FALSE, assume our local cache is already complete and do
+   *   not make a call to the Sharpspring REST API to doublecheck.
+   *
+   * @return array
+   *   Zero or more lead structures. (It really should be maximum 1 because we
+   *   cannot update a second lead to the same e-mail address. But who knows
+   *   what Sharpspring is capable of - the documentation does not specify it
+   *   and it accepts bogus e-mail addresses - so we won't make guarantees
+   *   about the API result.)
    */
-  protected function updateMemoryCaches(array $lead_array) {
-    $lead_exists = isset($this->propertyCache[$lead_array['id']]);
+  public function getLeadsByEmail($email, $check_remotely = TRUE) {
+    $ids = !empty($this->sharpspringIdsByEmail[$email]) ? $this->sharpspringIdsByEmail[$email] : [];
 
-    // Update the reverse lookup cache for the foreign key.
-    if (!empty($this->foreignKey) && !empty($lead_array[$this->foreignKey])) {
-      $value_was_changed = $lead_exists;
-      $fkey_id = $lead_array[$this->foreignKey];
-      if (empty($this->sharpspringIdsByForeignKey[$fkey_id])) {
-        $this->sharpspringIdsByForeignKey[$fkey_id] = [ $lead_array['id'] ];
-      }
-      elseif ($lead_exists) {
-        // If the Sharpspring ID is already there, this means we're updating an
-        // existing lead in the cache which hasn't changed foreign key value,
-        // and we don't need to do anything.
-        $value_was_changed = !in_array($lead_array['id'], $this->sharpspringIdsByForeignKey[$fkey_id]);
-        if ($value_was_changed) {
-          $this->sharpspringIdsByForeignKey[$fkey_id][] = $lead_array['id'];
-          // Some other sharpspring ID has the same foreign key. In principle
-          // this can happen, but it would be unlikely. Maybe this is some kind
-          // of bug in custom code's logic, so log a warning.
-          // @todo make the types of messages which are logged, configurable? (There
-          //       won't be too many of them...)
-          $this->log('warning', 'Duplicate leads found for foreign key id {fkey_id}. First is {first}, now adding {new}.', [
-            'fkey_id' => $fkey_id,
-            'first' => reset($this->sharpspringIdsByForeignKey[$fkey_id]),
-            'new' => $lead_array['id'],
-          ]);
+    $leads = [];
+    if ($ids) {
+      foreach ($ids as $id) {
+        // We assume this never does a remote call because our in-memory lookup
+        // caches are in sync with our key-value store data.
+        $lead = $this->getLead($id);
+        if ($lead) {
+          $leads[] = $lead;
+        }
+        else {
+          $this->log('error', 'LocalLeadCache internal error: Sharpspring object {id} not found, while its id was cached by e-mail {email}.', ['id' => $id, 'email' => $email]);
         }
       }
-      if ($value_was_changed) {
-        // The lead used to have a different foreign key value. Remove it from
-        // the reverse lookup cache.
-        $previous_value = $this->getPropertyValue($this->foreignKey, $lead_array['id'], FALSE);
-        if ($previous_value) {
-          $this->sharpspringIdsByForeignKey[$previous_value] = array_filter($this->sharpspringIdsByForeignKey[$previous_value], function ($v) use ($lead_array) { return $v !== $lead_array['id'];});
+    }
+    elseif ($check_remotely) {
+      $leads = $this->getLeads(['emailAddress' => $email]);
+      foreach ($leads as $lead) {
+        if (!empty($lead['active'])) {
+          $this->log('notice', 'Sharpspring object with e-mail {email} ({id}) was just retrieved remotely and is active. Apparently the local cache is out of date.', ['id' => $lead['id'], 'email' => $email]);
         }
       }
     }
 
-    // Update the reverse lookup cache for the e-mail address in the same way.
-    $value_was_changed = $lead_exists;
-    $email = $lead_array['emailAddress'];
-    if (empty($this->sharpspringIdsByEmail[$email])) {
-      $this->sharpspringIdsByEmail[$email] = [ $lead_array['id'] ];
-    }
-    elseif ($lead_exists) {
-      $value_was_changed = !in_array($lead_array['id'], $this->sharpspringIdsByEmail[$email]);
-      if ($value_was_changed) {
-        $this->sharpspringIdsByEmail[$email][] = $lead_array['id'];
-        // E-mail clash: this should never happen / is only here because it's
-        // good to doublecheck Sharpspring (and our own code).
-        $this->log('error', 'LocalLeadCache internal error, or is our cache outdated? Duplicate leads found for e-mail {email}. First is {first}, now adding {new}.', [
-          'email' => $email,
-          'first' => reset($this->sharpspringIdsByEmail[$email]),
-          'new' => $lead_array['id'],
-        ]);
-        // @todo should we actually call getLeadRemote() here for the other ID(s), to update things?
-      }
-    }
-    if ($value_was_changed) {
-      $previous_value = $this->getPropertyValue('emailAddress', $lead_array['id'], FALSE);
-      if ($previous_value) {
-        // We 'know' there can only be one e-mail so we might as well unset the
-        // value / assign empty array to it. But out of principle, we filter().
-        $this->sharpspringIdsByEmail[$previous_value] = array_filter($this->sharpspringIdsByEmail[$previous_value], function ($v) use ($lead_array) { return $v !== $lead_array['id'];});
-      }
-    }
-
-    // Update property cache. If we have no properties, we still need to set it
-    // (with an empty array) so that the 'lead exists' check above can be done
-    // without a call to the key-value store.
-    $cache_object = [];
-    foreach ($this->cachedProperties as $property) {
-      if (isset($lead_array[$property])) {
-        $cache_object[] = $lead_array[$property];
-      }
-      else {
-        $this->log('error', 'Sharpspring object {id} contains no {property} property; is this possible?', ['id' => $lead_array['id'], 'property' => $property]);
-        // There is no use in throwing an exception. We'll just not cache it.
-        $cache_object[] = NULL;
-      }
-    }
-    $this->propertyCache[$lead_array['id']] = $cache_object;
+    return $leads;
   }
 
   /**
-   * Removes a lead from the in-memory cache and key-value store.
+   * Retrieves lead(s) (arrays, not objects) by foreign key ID.
    *
-   * @param array $where
-   *   A key-value array containing ONE item only, with key being either 'id' or
-   *  'emailAddress' - this is equal to the argument to getLeadsRemote().
+   * Only retrieves leads which are known in the in-memory cache. Therefore,
+   * does not necessarily return inactive leads.
+   *
+   * @param string $foreign_key_id
+   *   The 'foreign key ID' from a remote system.
+   *
+   * @return array
+   *   Zero or more lead structures. (Hopefully either 0 or 1.)
    */
-  protected function uncacheLead(array $where) {
-    if (isset($where['emailAddress'])) {
-      if (empty($this->sharpspringIdsByEmail[$where['emailAddress']])) {
-        $ids = [];
-      }
-      else {
-        $ids = $this->sharpspringIdsByEmail[$where['emailAddress']];
-        // Already unset the reverse lookup cache for e-mail.
-        $this->sharpspringIdsByEmail[$where['emailAddress']] = [];
-      }
-    }
-    else {
-      // No further checks on $where; this is a protected function.
-      $ids = [ $where['id'] ];
-    }
-
+  public function getLeadsByForeignKey($foreign_key_id) {
+    $ids = !empty($this->sharpspringIdsByForeignKey[$foreign_key_id]) ? $this->sharpspringIdsByForeignKey[$foreign_key_id] : [];
+    $leads = [];
     foreach ($ids as $id) {
-      // From the ID we need to derive (possibly) the e-mail and the foreign key
-      // value. We don't know if these are in the property cache. Still, it's
-      // probably a bit better to use getPropertyValue() calls than a getLead()
-      // call, even though that might cause two requests to the key-value store.
-
-      // Get e-mail address, if we don't have it yet - and unset its cache.
-      if (!isset($where['emailAddress'])) {
-        $email = $this->getPropertyValue('emailAddress', $id, FALSE);
-        if ($email) {
-          $this->sharpspringIdsByEmail[$email] = [];
-        }
+      $lead = $this->getLead($id);
+      if ($lead) {
+        $leads[] = $lead;
       }
-
-      // Get foreign key value and unset its reverse lookup cache.
-      if (!empty($this->foreignKey)) {
-        $fkey_id = $this->getPropertyValue($this->foreignKey, $id, FALSE);
-        if ($fkey_id) {
-          $this->sharpspringIdsByForeignKey[$fkey_id] = [];
-        }
+      else {
+        $this->log('error', 'LocalLeadCache internal error: Sharpspring object {id} not found, while its id was cached by foreign key ID {fkey_id}.', ['id' => $id, 'fkey_id' => $foreign_key_id]);
       }
-
-      // Unset property cache.
-      unset($this->propertyCache[$id]);
     }
 
-    // Remove from key-value store.
-    $this->keyValueStore->deleteMultiple($ids);
+    return $leads;
   }
 
   /**
-   * Log a message; ignore it if no logger was set.
+   * Retrieves a lead (array, not object), from the key-value store or remotely.
    *
-   * @param mixed $level
-   *   A string representation of a level. (No idea why PSR-3 defines "mixed".)
-   * @param string $message
-   *   The message.
-   * @param array $context
-   *   The log context. See PSR-3.
+   * If fetched remotely, the lead is cached in the key-value store and the
+   * in-memory cache is updated. This can be important for fetching inactive
+   * leads which cacheAllLeads() does not do.
+   *
+   * NOTE: The updateTimestamp value is unreliable; it may be expressed in local
+   * time or UTC! See cacheAllLeads().
+   *
+   * @param int $sharpspring_id
+   *   The lead's ID in Sharpspring.
+   * @param bool $check_remotely
+   *   (optional) If FALSE, assume our local cache is already complete and do
+   *   not make a call to the Sharpspring REST API to doublecheck. Default TRUE.
+   *   (because if the caller has a Sharpspring ID, it probably knows what it's
+   *   doing and we'll assume that if we don't have it cached here, that may be
+   *   because it's inactive. Or worse, the key-value cache is out of date).
+   *
+   * @return array
+   *   A lead structure; empty array means this ID does not exist.
    */
-  protected function log($level, $message, array $context = []) {
-    if (isset($this->logger)) {
-      $this->logger->log($level, $message, $context);
+  public function getLead($sharpspring_id, $check_remotely = TRUE) {
+    $lead = $this->keyValueStore->get($sharpspring_id, []);
+
+    if (!$lead && $check_remotely) {
+      $lead = $this->getLeadRemote($sharpspring_id);
+      if (!empty($lead['active'])) {
+        $this->log('notice', 'Sharpspring object {id} was just retrieved remotely and is active. Apparently the local cache is out of date.', ['id' => $sharpspring_id]);
+      }
     }
+
+    return $lead;
   }
 
   // REST API 'proxy' CRUD methods which update the local cache too.
@@ -949,6 +742,215 @@ class LocalLeadCache {
     }
 
     return $result;
+  }
+
+  // End REST API 'proxy' CRUD methods which update the local cache too.
+
+  /**
+   * Retrieves and caches all active leads from Sharpspring.
+   *
+   * NOTE: The updateTimestamp value differs if we fetch it using getLeads vs.
+   * getLeadsDateRange, so do not trust the value of the property on the Lead
+   * objects! (It's expressed in local timezone vs. UTC, respectively. We could
+   * convert it, but it's not exactly clear how "local timezone" is defined.)
+   *
+   * @param string $since
+   *   If empty, this method will clear the local cache and read / cache all
+   *   (active) leads from the Sharpspring account. If set to a time (string
+   *   representation in format Y-m-d H:i:s), only the updates since then will
+   *   be read and cached on top of the current contents of the cache. The time
+   *   has no timezone specification but is in UTC (tested on API v1.117,
+   *   20170127).
+   */
+  public function cacheAllLeads($since) {
+    if (!$since) {
+      $this->keyValueStore->deleteAll();
+      $this->propertyCache = $this->sharpspringIdsByForeignKey = $this->sharpspringIdsByEmail = [];
+    }
+
+    $offset = 0;
+    do {
+      $leads = $since
+        ? $this->getLeadsDateRange($since, '', 'update', static::LEADS_GET_LIMIT, $offset)
+        : $this->getLeads([], static::LEADS_GET_LIMIT, $offset);
+      $offset = count($leads) == static::LEADS_GET_LIMIT ? $offset + static::LEADS_GET_LIMIT : 0;
+    } while ($offset);
+  }
+
+  /**
+   * Caches a lead's data in the in-memory cache and key-value store.
+   *
+   * @param array $lead_array
+   *   A lead as retrieved from Sharpspring, in array format (not Lead object).
+   */
+  protected function cacheLead(array $lead_array) {
+    if (empty($lead_array['id'])) {
+      $this->log('critical', "LocalLeadCache internal coding error: Sharpspring object {object} has no 'id' parameter in cacheLead().", ['object' => isset($lead_array['emailAddress']) ? $lead_array['emailAddress'] : json_encode($lead_array)]);
+    }
+    else {
+      $this->updateMemoryCaches($lead_array);
+      $this->keyValueStore->set($lead_array['id'], $lead_array);
+    }
+  }
+
+  /**
+   * Updates a lead's data in the in-memory cache.
+   *
+   * @param array $lead_array
+   *   A lead as retrieved from Sharpspring, in array format (not Lead object).
+   */
+  protected function updateMemoryCaches(array $lead_array) {
+    $lead_exists = isset($this->propertyCache[$lead_array['id']]);
+
+    // Update the reverse lookup cache for the foreign key.
+    if (!empty($this->foreignKey) && !empty($lead_array[$this->foreignKey])) {
+      $value_was_changed = $lead_exists;
+      $fkey_id = $lead_array[$this->foreignKey];
+      if (empty($this->sharpspringIdsByForeignKey[$fkey_id])) {
+        $this->sharpspringIdsByForeignKey[$fkey_id] = [ $lead_array['id'] ];
+      }
+      elseif ($lead_exists) {
+        // If the Sharpspring ID is already there, this means we're updating an
+        // existing lead in the cache which hasn't changed foreign key value,
+        // and we don't need to do anything.
+        $value_was_changed = !in_array($lead_array['id'], $this->sharpspringIdsByForeignKey[$fkey_id]);
+        if ($value_was_changed) {
+          $this->sharpspringIdsByForeignKey[$fkey_id][] = $lead_array['id'];
+          // Some other sharpspring ID has the same foreign key. In principle
+          // this can happen, but it would be unlikely. Maybe this is some kind
+          // of bug in custom code's logic, so log a warning.
+          // @todo make the types of messages which are logged, configurable? (There
+          //       won't be too many of them...)
+          $this->log('warning', 'Duplicate leads found for foreign key id {fkey_id}. First is {first}, now adding {new}.', [
+            'fkey_id' => $fkey_id,
+            'first' => reset($this->sharpspringIdsByForeignKey[$fkey_id]),
+            'new' => $lead_array['id'],
+          ]);
+        }
+      }
+      if ($value_was_changed) {
+        // The lead used to have a different foreign key value. Remove it from
+        // the reverse lookup cache.
+        $previous_value = $this->getPropertyValue($this->foreignKey, $lead_array['id'], FALSE);
+        if ($previous_value) {
+          $this->sharpspringIdsByForeignKey[$previous_value] = array_filter($this->sharpspringIdsByForeignKey[$previous_value], function ($v) use ($lead_array) { return $v !== $lead_array['id'];});
+        }
+      }
+    }
+
+    // Update the reverse lookup cache for the e-mail address in the same way.
+    $value_was_changed = $lead_exists;
+    $email = $lead_array['emailAddress'];
+    if (empty($this->sharpspringIdsByEmail[$email])) {
+      $this->sharpspringIdsByEmail[$email] = [ $lead_array['id'] ];
+    }
+    elseif ($lead_exists) {
+      $value_was_changed = !in_array($lead_array['id'], $this->sharpspringIdsByEmail[$email]);
+      if ($value_was_changed) {
+        $this->sharpspringIdsByEmail[$email][] = $lead_array['id'];
+        // E-mail clash: this should never happen / is only here because it's
+        // good to doublecheck Sharpspring (and our own code).
+        $this->log('error', 'LocalLeadCache internal error, or is our cache outdated? Duplicate leads found for e-mail {email}. First is {first}, now adding {new}.', [
+          'email' => $email,
+          'first' => reset($this->sharpspringIdsByEmail[$email]),
+          'new' => $lead_array['id'],
+        ]);
+        // @todo should we actually call getLeadRemote() here for the other ID(s), to update things?
+      }
+    }
+    if ($value_was_changed) {
+      $previous_value = $this->getPropertyValue('emailAddress', $lead_array['id'], FALSE);
+      if ($previous_value) {
+        // We 'know' there can only be one e-mail so we might as well unset the
+        // value / assign empty array to it. But out of principle, we filter().
+        $this->sharpspringIdsByEmail[$previous_value] = array_filter($this->sharpspringIdsByEmail[$previous_value], function ($v) use ($lead_array) { return $v !== $lead_array['id'];});
+      }
+    }
+
+    // Update property cache. If we have no properties, we still need to set it
+    // (with an empty array) so that the 'lead exists' check above can be done
+    // without a call to the key-value store.
+    $cache_object = [];
+    foreach ($this->cachedProperties as $property) {
+      if (isset($lead_array[$property])) {
+        $cache_object[] = $lead_array[$property];
+      }
+      else {
+        $this->log('error', 'Sharpspring object {id} contains no {property} property; is this possible?', ['id' => $lead_array['id'], 'property' => $property]);
+        // There is no use in throwing an exception. We'll just not cache it.
+        $cache_object[] = NULL;
+      }
+    }
+    $this->propertyCache[$lead_array['id']] = $cache_object;
+  }
+
+  /**
+   * Removes a lead from the in-memory cache and key-value store.
+   *
+   * @param array $where
+   *   A key-value array containing ONE item only, with key being either 'id' or
+   *  'emailAddress' - this is equal to the argument to getLeadsRemote().
+   */
+  protected function uncacheLead(array $where) {
+    if (isset($where['emailAddress'])) {
+      if (empty($this->sharpspringIdsByEmail[$where['emailAddress']])) {
+        $ids = [];
+      }
+      else {
+        $ids = $this->sharpspringIdsByEmail[$where['emailAddress']];
+        // Already unset the reverse lookup cache for e-mail.
+        $this->sharpspringIdsByEmail[$where['emailAddress']] = [];
+      }
+    }
+    else {
+      // No further checks on $where; this is a protected function.
+      $ids = [ $where['id'] ];
+    }
+
+    foreach ($ids as $id) {
+      // From the ID we need to derive (possibly) the e-mail and the foreign key
+      // value. We don't know if these are in the property cache. Still, it's
+      // probably a bit better to use getPropertyValue() calls than a getLead()
+      // call, even though that might cause two requests to the key-value store.
+
+      // Get e-mail address, if we don't have it yet - and unset its cache.
+      if (!isset($where['emailAddress'])) {
+        $email = $this->getPropertyValue('emailAddress', $id, FALSE);
+        if ($email) {
+          $this->sharpspringIdsByEmail[$email] = [];
+        }
+      }
+
+      // Get foreign key value and unset its reverse lookup cache.
+      if (!empty($this->foreignKey)) {
+        $fkey_id = $this->getPropertyValue($this->foreignKey, $id, FALSE);
+        if ($fkey_id) {
+          $this->sharpspringIdsByForeignKey[$fkey_id] = [];
+        }
+      }
+
+      // Unset property cache.
+      unset($this->propertyCache[$id]);
+    }
+
+    // Remove from key-value store.
+    $this->keyValueStore->deleteMultiple($ids);
+  }
+
+  /**
+   * Log a message; ignore it if no logger was set.
+   *
+   * @param mixed $level
+   *   A string representation of a level. (No idea why PSR-3 defines "mixed".)
+   * @param string $message
+   *   The message.
+   * @param array $context
+   *   The log context. See PSR-3.
+   */
+  protected function log($level, $message, array $context = []) {
+    if (isset($this->logger)) {
+      $this->logger->log($level, $message, $context);
+    }
   }
 
 }
