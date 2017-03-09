@@ -3,527 +3,43 @@
 namespace SharpSpring\RestApi;
 
 /**
- * The Lead table consists of prospects who are possibly interested in your
- * product. As a lead progresses through your pipeline, their status changes
- * from unqualified to qualified. A lead can be converted into a contact,
- * opportunity, or account.
+ * Sharpspring REST API Connection object designed to make coders' lives easier.
  *
- * Different parts of the REST API seem to have a different understanding about
- * what are valid fields (tested on API v1.117, 20161205). We have:
- * - the return value from the getFields() call; this includes 'crmID' and
- *   custom fields but not 'accountID' and 'active'.
- * - the fieldnames returned by a getLead() call, which apparently returns all
- *   fields also when they are empty/null; this includes 'accountID', 'active'
- *   and custom fields but not 'crmID';
- * - the accepted fieldnames (as far we can tell this is the same as previous)
- * - the list of valid parameters we get back as part of an error message,
- *   when we try to set an invalid parameter/field; this includes 'accountID'
- *   and 'active'(?) but not crmID or any custom fields.
+ * This class contains methods corresponding to many API methods, to ease
+ * working with the API. As some details of the API calls (parameters and
+ * response format) are not documented extensively, the methods in this class
+ * take care of abstracting away some tediousness and provide documentation with
+ * each method. All methods wrap around a generic call() method; it is allowed
+ * but hopefully not necessary to use call(), because wrapper functions exist.
  *
- * The following fields are also (like crmID) part of the getFields() output but
- * not among properties returned for a lead. I haven't checked points 3 and 4
- * for them, but so far assume they are invalid just like crmID... Then again,
- * they could be read-only fields that only become visible after some action
- * happens inside Sharpspring.
- *   numBounces - int - Number of Bounces
- *   hardBounced - int - Hard Bounced Email Address
- *   hasOpportunity - bit - Has an Opportunity
- *   isQualified - bit - Is Qualified
- *   isContact - bit - Is Contact
- * These fields are therefore (like crmID) not defined below.
+ * This class performs quite strict validation on the JSON values returned from
+ * API calls, especially since the API response can contain duplicate info. If
+ * the response has an unexpected format, an exception is thrown. This has the
+ * advantage of calling code being able to trust returned values, making its
+ * 'flow' easier. The flip side is that it needs to implement good exception
+ * handling; if Sharpspring decides to make changes to undocumented parts of the
+ * API response, this class will likely start throwing exceptions and will need
+ * to be changed.
+ *
+ * Create/update methods (for leads only, so far) make use of our ValueObject
+ * structures, but don't enforce using them: they accept Lead objects as well as
+ * arrays.
+ *
+ * Create/update/delete methods which handle multiple leads will throw a
+ * SharpSpringRestApiException if at least one of the objects returns failure.
+ * The caller is then responsible for checking which objects succeeded/failed,
+ * from the exception's getData() return value.
+ *
+ * This class does handle the connection/authentication details of making the
+ * actual REST call; this responsibility is delegated to a 'client' object that
+ * must be injected in the constructor, so that details around networking /
+ * credentials can be handled completely separately from this class' logic.
  */
-class Lead extends ValueObject {
-  // Note I don't know why isUnsubscribed and active are nullable. It probebly
-  // does not make sense to set them to NULL. They *can* be (re)set to NULL
-  // though, unlike string fields. (It's probably an API fail.) 'active' has
-  // default value 1, whereas the others default to NULL.
-  protected $_nullableProperties = ['accountID', 'ownerID', 'isUnsubscribed', 'active'];
-
+class Connection {
   /**
-   * Indicator whether this is an active lead. Must be 0 or 1.
-   *
-   * This is not among the fields returned by getFields(); it's a special
-   * property to deactivate leads (make them invisible and not be part of the
-   * return values in a getLeads() call unless the lead is requested by its
-   * specific id/emailAddress.
-   *
-   * 'bool' means the only valid values are strings '0' and '1'. It is
-   * automatically set to '1' for new objects. It is nullable though. (No idea
-   * if this is a mistake or what Sharpspring does with active=NULL.)
-   *
-   * @var bool
+   * A REST API client.
    */
-  public $active = "\0";
-
-  /**
-   * Is Unsubscribed?
-   *
-   * 'bool' means the only valid values are strings '0' and '1'. It's also
-   * nullable (and starts as null for new objects).
-   *
-   * @var bool
-   */
-  public $isUnsubscribed = "\0";
-
-  /**
-   * SharpSpring ID.
-   *
-   * This is one of the two possible 'identifier properties' for a lead.
-   *
-   * It's apparently 12 digits, which fits into an int in most systems.
-   *
-   * (tested on API v1.117, 20161205:) Is ignored on createLead calls. Is
-   * required on updateLead calls, except when updating a lead with a known-
-   * existing emailAddress that won't change during the update; then this may be
-   * left empty. (Do not change its value; you'll end up updating a different
-   * lead - or nothing at all depending on the e-mail address; see comments at
-   * updateLead().)
-   *
-   * @var int
-   */
-  public $id;
-
-  /**
-   * Email
-   *
-   * This is one of the two possible 'identifier properties' for a lead.
-   *
-   * WARNING: see comments at updateLead() for gotchas on updating existing
-   * leads. In summary: if you're sure that you are not changing this value,
-   * you're fine; otherwise you must doublecheck whether an update succeeds.
-   *
-   * In Sharpspring this is data type 'email'. The REST API however does NOT
-   * validate the contents; it is possible to insert a bogus string.
-   *
-   * @var string
-   */
-  public $emailAddress;
-
-  /**
-   * Owner ID.
-   *
-   * @var int|null
-   */
-  public $ownerID = "\0";
-
-  /**
-   * Account ID.
-   *
-   * @var int|null
-   */
-  public $accountID = "\0";
-
-  /**
-   * Lead Status.
-   *
-   * Possible values (as currently known):
-   * - unqualified
-   * - open
-   * - qualified
-   * - contact
-   * - contactWithOpp: all we know about this value so far is that in the UI,
-   *   - for 'regular' contacts, it cannot be set
-   *   - if it is somehow set, a different type cannot be set.
-   *   This probably goes for the REST API too. So far we have seen that
-   *   updating a contactWithOpp to contact is impossible; the REST API will
-   *   return success but the field is not updated.
-   * Leaving this empty when creating a contact will set it to 'unqualified'.
-   * Other values will have the REST API return an error.
-   *
-   * @var string
-   */
-  public $leadStatus;
-
-  /**
-   * Lead Score.
-   *
-   * This value can be upated; getLead API calls will return the updated score
-   * but this update won't be reflected in the Lead Score that shows for a user
-   * in the UI. *shrug*
-   *
-   * @var int
-   */
-  public $leadScore;
-
-  /**
-   * First Name
-   *
-   * @var string
-   */
-  public $firstName;
-
-  /**
-   * Last Name
-   *
-   * @var string
-   */
-  public $lastName;
-
-  /**
-   * Title.
-   *
-   * @var string
-   */
-  public $title;
-
-  /**
-   * Company Name.
-   *
-   * @var string
-   */
-  public $companyName;
-
-  /**
-   * Industry.
-   *
-   * @var string
-   */
-  public $industry;
-
-  /**
-   * Website.
-   *
-   * @var string
-   */
-  public $website;
-
-  /**
-   * Street.
-   *
-   * @var string
-   */
-  public $street;
-
-  /**
-   * City.
-   *
-   * @var string
-   */
-  public $city;
-
-  /**
-   * Country.
-   *
-   * @var string
-   */
-  public $country;
-
-  /**
-   * State.
-   *
-   * @var string
-   */
-  public $state;
-
-  /**
-   * Zip.
-   *
-   * @var string
-   */
-  public $zipcode;
-
-  /**
-   * Phone Number.
-   *
-   * @var string
-   */
-  public $phoneNumber;
-
-  /**
-   * Extension.
-   *
-   * @var string
-   */
-  public $phoneNumberExtension;
-
-  /**
-   * Office Phone Number.
-   *
-   * @var string
-   */
-  public $officePhoneNumber;
-
-  /**
-   * Mobile Phone.
-   *
-   * @var string
-   */
-  public $mobilePhoneNumber;
-
-  /**
-   * Fax.
-   *
-   * @var string
-   */
-  public $faxNumber;
-
-  /**
-   * Description.
-   *
-   * @var string
-   */
-  public $description;
-
-  /**
-   * Last updated date/time.
-   *
-   * Date in ISO format, e.g. '2016-12-06 00:52:12'. This stretches the
-   * definition of 'timestamp' a bit, because there is no timezone information.
-   * There is also no API documentation on what the timestamp means. What we
-   * know so far is:
-   * - the getLeadsDateRange call returns Lead objects with updateTimestamp
-   *   values expressed in UTC.
-   * - the getLead and getLeads calls return Lead objects with updateTimestamp
-   *   values expressed in your local timezone(!!! However that may be derived.)
-   * - if you change the timezone of your Web UI account, do updates, and then
-   *   change the timezome again... this has this has no effect on the
-   *   updateTimestamp that is ultimately received through API calls.
-   * So the working theory is
-   * - The date is actually stored on the server in a 'proper timestamp' format;
-   * - The date for getLead(s) calls is always converted to "your" timezone,
-   *   probably using timezone information that is somehow connected to your
-   *   API key. (Unless it's IP based.)
-   *
-   * Let's assume this updateTimestamp is not updatable to specified values -
-   * which is the only sane situation.
-   * The author tested updating this value in november/december 2016 (with api
-   * v1.117) and worryingly, it was. Then tested this again in january 2017, and
-   * it was not. (This can mean several things: 1) the author is braindead; 2)
-   * Sharpspring fixed this part of their API; 3) the updateTimestamp is only
-   * updatable until the lead is 'locked' because it's in use. Let's assume 1.)
-   *
-   * @var string
-   */
-  public $updateTimestamp;
-
-}
-
-/**
- * Base class for Sharpspring value objects (Leads, etc).
- *
- * A value object represents e.g. a lead with all its properties predefined.
- * This is especially useful over using arrays because the Sharpspring API
- * objects' property names are case sensitive, heightening the chance of
- * exceptions thrown because of misspelled property names.
- *
- * Objects are converted to an array before e.g. JSON-encoding them for REST API
- * communication; this should be done using the toArray() method rather than
- * casting to an array (so all unwanted properties get cleared).
- *
- * A subclass can add custom properties that are not necessarily equal to the
- * system names of custom Sharpspring fields; see $_customProperties.
- *
- * Setting most properties to NULL will cause them to be excluded from the
- * toArray() return value, which means they won't be sent in REST API create /
- * update calls. (These usually cause the REST API to return an object-level
- * error 205 "Invalid parameters", when trying to update them to NULL.)
- * There are however 'nullable' properties; see $_nullableProperties.
- *
- * There are also non-nullable properties which still have NULL as the initial
- * value (upon retrieving an object from the REST API after having created it).
- * This probably is the case for every non-custom string field. This seems like
- * a design flaw in the REST API; we have not explicitly marked these and just
- * recommend any callers to treat NULL and empty string as equal for these
- * fields.
- */
-class ValueObject {
-  /**
-   * All property names in the object that are nullable.
-   *
-   * Most defined properties in a new object start out as unset === NULL. We
-   * don't want to send NULL for all those property values, so toArray() unsets
-   * all NULL properties. The problem with that is, some properties have to be
-   * able to be set explicitly to NULL in e.g. updateLead calls.
-   *
-   * The properties specified by name here should be kept if they are NULL - and
-   * are unset only if they contain "\0" instead. These properties typically are
-   * defined with:
-   *   public $propertyName = "\0";
-   * They should only be NULL / undefined by default if you intend for toArray()
-   * to keep them by default.
-   *
-   * @var array
-   */
-  protected $_nullableProperties = [];
-
-  /**
-   * All custom defined property names used by a subclass. (Not required here.)
-   *
-   * Custom fields can just be set in an object (like e.g.
-   *   $lead->custom_id_nr_56dff55bed3f4 = 1;
-   * ), but since Sharpspring custom field system names are tedious and may
-   * change when code is used on different Sharpspring accounts / environments,
-   * it may be better to define your own custom property names in your own
-   * subclass of a value object, and map those to the actual custom field system
-   * names. (Defineing your own custom property names gets you IDE
-   * autocompletion.)
-   *
-   * The mapping can be handled in different ways, depending on your use case:
-   * define this variable statically in your subclass, or set it in the
-   * constructor, or call setCustomProperties() on a Connection object. (The
-   * latter is more suitable in general code where field names are not always
-   * the same - but then all toArray() calls will have to pass the mapping.)
-   *
-   * Array keys are the custom property names and values are the actual
-   * Sharpspring custom field names. Though it is possible to define those
-   * in a subclass, this means that the class is tied to one specific
-   * Sharpspring account / environment, so it may be better to set this mapping
-   * in the client instead, using SharpSpringRestClient::
-   */
-  protected $_customProperties = [];
-
-  /**
-   * Constructs an object, converting custom system fields.
-   *
-   * @param array $values
-   *   Values to initialize in the object. We assume custom field values are set
-   *   with a Sharpspring 'field system name' key; the corresponding property
-   *   will be set to this value.
-   * @param array $custom_properties
-   *   The custom property name to Sharpspring field system name mapping, which
-   *   should be used. Any fields not specified here will be taken from
-   *   $this->_customProperties if they are defined there.
-   */
-  public function __construct(array $values = [], array $custom_properties = []) {
-    $custom_properties += $this->_customProperties;
-    // We assume no duplicate properties are set to the same field system name.
-    // If so, it is unclear which property will be filled.
-    $custom_fields = array_flip($custom_properties);
-    foreach ($values as $name => $value) {
-      if (isset($custom_fields[$name])) {
-        $name = $custom_fields[$name];
-      }
-      $this->$name = $value;
-    }
-  }
-
-  /**
-   * Converts our object to an array, converting custom properties.
-   *
-   * @param array $custom_properties
-   *   The custom property name to Sharpspring field system name mapping, which
-   *   should be used. Any fields not specified here will be taken from
-   *   $this->_customProperties if they are defined there.
-   *
-   * @return array
-   *   The array value for this object.
-   */
-  public function toArray(array $custom_properties = []) {
-    $array = [];
-    $custom_properties += $this->_customProperties;
-
-    // All defined properties should be set in the array except NULL properties
-    // (because otherwise the REST service will return "invalid value" errors).
-    // The exception: 'nullable' properties; in their case the 'skip' value is
-    // "\0".
-    $nullable = array_flip($this->_nullableProperties);
-    foreach ($this as $name => $value) {
-      if (strpos($name, '_') !== 0 && $value !== (isset($nullable[$name]) ? "\0" : NULL)) {
-        // Set the value. But where? If this is a custom property name,
-        // translate it to the field system name. (We are assuming that no
-        // property named after the field system name is ever set in the
-        // object, and that no duplicate properties are mapped to the same field
-        // system name. If that happens, values can get lost in the array.)
-        if (isset($custom_properties[$name])) {
-          $name = $custom_properties[$name];
-        }
-        $array[$name] = $value;
-      }
-    }
-
-    return $array;
-  }
-
-}
-
-/**
- * Exception that wraps error data in responses from the Sharpspring REST API.
- */
-class SharpSpringRestApiException extends \RuntimeException {
-  /**
-   * @var bool
-   */
-  protected $objectLevel;
-
-  /**
-   * @var array
-   */
-  protected $errorData;
-
-  public function __construct($message = '', $code = 0, $data = [], $object_level = FALSE, \Exception $previous = null) {
-    parent::__construct($message, $code, $previous);
-    $this->errorData = $data;
-    $this->objectLevel = $object_level;
-  }
-
-  /**
-   * Signifies whether the exception was thrown for a single object-level error.
-   *
-   * Sharpspring\Rest\Connection uses this as follows: Default/false is an API-
-   * level error, which indicates an error was encountered during processing of
-   * the request. An object-level error means the request as a whole succeeded
-   * but handling at least one object (of possibly several in the same request)
-   * failed. In this case a non-zero code is a code as returned by the REST API
-   * for one specific object; code 0 indicates more than one object-level error
-   * may have been encountered and getData() has the actual details.
-   *
-   * @return bool
-   *   If TRUE, an object-level (as opposed to API-level) error was encountered.
-   */
-  public function isObjectLevel() {
-    return $this->objectLevel;
-  }
-
-  /**
-   * Returns a data array (if any) containing more details about the error.
-   *
-   * Sharpspring\Rest\Connection uses this as follows: For API-level errors,
-   * this returns the data that was returned inside the 'error' section of the
-   * response (except for code 0, which is theoretical enough not to explain).
-   * For object-level errors with a non-zero code, this returns the data that
-   * was returned with the specific object error; for code 0 it returns the
-   * whole 'result' section of the response, which contains a numerically
-   * indexed sub-array for each object processed containing key/value pairs
-   * 'success' (bool) and 'error'. Each failed object (of which there must be at
-   * least one) has a non-null 'error' section being an array containing
-   * 'message' (string), 'code' (numeric) and 'data' values.
-   *
-   * The 'data' could be anything / its exact structure is not explored yet. It
-   * is always an array, except for codes < 100; see handleLeads() for those.
-   *
-   * @return array
-   */
-  public function getData() {
-    return $this->errorData;
-  }
-
-  /**
-   * {@inheritdoc}
-   *
-   * Modeled after the original exception string but with data inserted before
-   * the stack trace. (Pretty-printed JSON, because the stack trace is already
-   * adding lots of data anyway.)
-   */
-  public function __toString() {
-    return sprintf("Sharpspring REST API%s error '%s' with code %d / message '%s' in %s:%d\nData:\n%s\nStack trace:\n%s", $this->isObjectLevel() ? ' object-level' : '', get_class($this), $this->getCode(), $this->getMessage(), $this->getFile(), $this->getLine(), json_encode($this->getData(), JSON_PRETTY_PRINT), $this->getTraceAsString());
-  }
-}
-
-/**
- * A Sharpspring REST API client.
- */
-class SharpSpringRestClient {
-  // REST endpoint without trailing slash.
-  const SHARPSPRING_BASE_URL = 'https://api.sharpspring.com/pubapi/v1';
-  /**
-   * @var string
-   */
-  protected $accountId;
-
-  /**
-   * @var string
-   */
-  protected $secretKey;
+  protected $client;
 
   /**
    * The property to field name mappings for custom Sharpspring fields.
@@ -536,60 +52,14 @@ class SharpSpringRestClient {
   protected $customPropertiesByType;
 
   /**
-   * SharpSpringRestClient constructor.
+   * Constructor.
    *
-   * @param string $account_id
-   *   The account ID to use for API calls.
-   * @param string $secret_key
-   *   The 'secret key' to use for API calls.
+   * @param object $client
+   *   The client object responsible for making the actual API calls. (Not
+   *   typehinted because there is no formal interface.)
    */
-  public function __construct($account_id, $secret_key) {
-    $this->setAccountId($account_id);
-    $this->setSecretKey($secret_key);
-  }
-
-  /**
-   * Getter of accountId property.
-   *
-   * @return string
-   */
-  public function getAccountId() {
-    return $this->accountId;
-  }
-
-  /**
-   * Setter of accountId property.
-   *
-   * @param string $account_id
-   *
-   * @return mixed
-   */
-  public function setAccountId($account_id) {
-    $this->accountId = $account_id;
-
-    return $account_id;
-  }
-
-  /**
-   * Getter of secretKey property.
-   *
-   * @return string
-   */
-  public function getSecretKey() {
-    return $this->secretKey;
-  }
-
-  /**
-   * Setter of secretKey property.
-   *
-   * @param string $secret_key
-   *
-   * @return mixed
-   */
-  public function setSecretKey($secret_key) {
-    $this->secretKey = $secret_key;
-
-    return $secret_key;
+  public function __construct($client) {
+    $this->client = $client;
   }
 
   /**
@@ -668,12 +138,73 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Execute a query against REST API.
+   * Checks format/contents of an API result, which contains info about objects.
+   *
+   * This can be called for e.g. the result of a createLeads() call, by code
+   * which is not happy enough with the fact that no exception was thrown and
+   * wants to verify the structure of the response value before doing things
+   * with it.
+   *
+   * The result format is an array with zero-based numeric keys, and a value for
+   * each handled object that was initially passed into the API call, being an
+   * array with at least a 'success' and 'error' value.
+   *
+   * @param mixed $result
+   *   The result returned from the (successful) REST API call that took action
+   *   on objects (e.g. createLeads, updateLeads, deleteLeads). This should
+   *   really be an array (and anything else will throw an exception).
+   * @param array $objects
+   *   The objects that were provided as input for the REST API call. (At the
+   *   moment they are only used to derive keys / count, but who knows...)
+   * @param string $method
+   *   The REST API method called. (Used to make the exception message clearer.)
+   * @param bool $validate_individual_objects
+   *   (optional) If FALSE, only validate the structure of the result. By
+   *   default (TRUE), also validate the contents of the individual object
+   *   results. This means if one object is found to be invalid, an exception
+   *   will be thrown for that one and further objects will not be checked.
+   * @param bool $error_encountered
+   *   (optional) TRUE if an 'error' result is being evaluated. This is used to
+   *   make the exception message clearer. Should not be necessary for external
+   *   code because the API call already validates the structure of 'error'
+   *   results.
+   *
+   * @throws SharpSpringRestApiException
+   *   If the result contains an object-level error; the error for one of the
+   *   objects only. Only possible for $validate_individual_objects = TRUE.
+   * @throws \UnexpectedValueException
+   *   If the result has an unexpected format.
+   */
+  protected function validateResultForObjects($result, array $objects, $method, $validate_individual_objects = TRUE, $error_encountered = FALSE) {
+    $return = NULL;
+    $extra = $error_encountered ? ' while evaluating object-level error(s)' : '';
+    if (!is_array($result)) {
+      throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the 'result' part of the response is not an array.\nResponse result for $method call: " . json_encode($result), 101);
+    }
+    if (count($objects) != count($result)) {
+      throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the number of objects provided to the call (" . count($objects) . ") is different from the number of objects returned in the 'result' part of the response (" . count($result) . ").\nResponse result for $method call: " . json_encode($result), 102);
+    }
+    $index = 0;
+    foreach ($result as $i => $object_result) {
+      // We could live without the following if needed, but we need to clearly
+      // document how these indexes work then, to prevent bugs in other code.
+      if ($i !== $index) {
+        throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: result object was expected to have index $index; $i was found.\nResponse result for $method call: " . json_encode($result), 103);
+      }
+      if ($validate_individual_objects) {
+        $this->validateObjectResult($object_result);
+      }
+      $index++;
+    }
+  }
+
+  /**
+   * Call a REST API.method.
    *
    * @param string $method
    *   The REST API method name.
    * @param array $params
-   *   The parameters.
+   *   The parameters to the REST API method.
    * @param array $response_checks
    *   (optional) various ways in which the response value from the API (which
    *   will contain 'result' and 'error' sections) should be checked and/or
@@ -695,7 +226,8 @@ class SharpSpringRestClient {
    *     other objects can get lost.)
    *
    * @return array
-   *   A JSON structure.
+   *   A structure corresponding to the JSON response returned by the API, which
+   *   may be modified according to checks / parameters documented earlier.
    *
    * @throws SharpSpringRestApiException
    *   If the REST API response indicates an error encountered while executing
@@ -707,66 +239,9 @@ class SharpSpringRestClient {
    * @throws \RuntimeException
    *   If the request to the REST API fails.
    */
-  public function exec($method, array $params, array $response_checks = array()) {
-    $request_id = session_id();
-    $data = json_encode([
-      'method' => $method,
-      'params' => $params,
-      'id' => $request_id,
-    ]);
-    
-    $url = $this->createUrl([]);
-    $curl = curl_init();
-    curl_setopt($curl, CURLOPT_URL, $url);
-    curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_setopt($curl, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($curl, CURLOPT_RETURNTRANSFER, TRUE);
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
-    curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
-    curl_setopt($curl, CURLOPT_HTTPHEADER, [
-      'Content-Type: application/json',
-      'Content-Length: ' . strlen($data)
-    ]);
+  public function call($method, array $params, array $response_checks = array()) {
+    $response = $this->client->call($method, $params);
 
-    $response = curl_exec($curl);
-    if (!$response) {
-      $http_response = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-      $body = curl_error($curl);
-      curl_close($curl);
-
-      //The server successfully processed the request, but is not returning any content.
-      if ($http_response == 204) {
-        return []; // @todo this has no bearing on us, right? What call can use empty return value?
-      }
-      $error = 'CURL Error (' . get_class($this) . ")\n
-        url:$url\n
-        body: $body";
-      throw new \RuntimeException($error);
-    }
-    else {
-      // If request was ok, parsing http response code.
-      $http_response = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-      curl_close($curl);
-
-      // don't check 301, 302 because setting CURLOPT_FOLLOWLOCATION
-      if ($http_response != 200 && $http_response != 201) {
-        $error = "CURL HTTP Request Failed: Status Code :
-          $http_response, URL: $url
-          \nError Message : $response";
-        throw new \RuntimeException($error);
-      }
-    }
-
-    $response = json_decode($response, TRUE);
-    // In circumstances that should never happen according to the API docs, we
-    // throw exceptions without doing anything else. It will be up to the caller
-    // to safely halt the execution and alert a human to investigate this.
-    if (!isset($response['id'])) {
-      throw new \UnexpectedValueException("Sharpspring REST API systemic error: no id found in JSON response from SharpspringAPI endpoint. This should never happen.\nResponse: " . json_encode($response), 1);
-    }
-    if ($response['id'] != $request_id) {
-      throw new \UnexpectedValueException("Sharpspring REST API systemic error: unexpected id value found in JSON response from SharpspringAPI endpoint. This should never happen.\nRequest ID: $request_id\nResponse: " . json_encode($response), 2);
-    }
     if (empty($response['error']) && !isset($response['result'])) {
       throw new \UnexpectedValueException("Sharpspring REST API systemic error: response contains neither error nor result.\nResponse: " . json_encode($response), 3);
     }
@@ -873,67 +348,6 @@ class SharpSpringRestClient {
   }
 
   /**
-   * Checks format/contents of an API result, which contains info about objects.
-   *
-   * This can be called for e.g. the result of a createLeads() call, by code
-   * which is not happy enough with the fact that no exception was thrown and
-   * wants to verify the structure of the response value before doing things
-   * with it.
-   *
-   * The result format is an array with zero-based numeric keys, and a value for
-   * each handled object that was initially passed into the API call, being an
-   * array with at least a 'success' and 'error' value.
-   *
-   * @param mixed $result
-   *   The result returned from the (successful) REST API call that took action
-   *   on objects (e.g. createLeads, updateLeads, deleteLeads). This should
-   *   really be an array (and anything else will throw an exception).
-   * @param array $objects
-   *   The objects that were provided as input for the REST API call. (At the
-   *   moment they are only used to derive keys / count, but who knows...)
-   * @param string $method
-   *   The REST API method called. (Used to make the exception message clearer.)
-   * @param bool $validate_individual_objects
-   *   (optional) If FALSE, only validate the structure of the result. By
-   *   default (TRUE), also validate the contents of the individual object
-   *   results. This means if one object is found to be invalid, an exception
-   *   will be thrown for that one and further objects will not be checked.
-   * @param bool $error_encountered
-   *   (optional) TRUE if an 'error' result is being evaluated. This is used to
-   *   make the exception message clearer. Should not be necessary for external
-   *   code because the API call already validates the structure of 'error'
-   *   results.
-   *
-   * @throws SharpSpringRestApiException
-   *   If the result contains an object-level error; the error for one of the
-   *   objects only. Only possible for $validate_individual_objects = TRUE.
-   * @throws \UnexpectedValueException
-   *   If the result has an unexpected format.
-   */
-  protected function validateResultForObjects($result, array $objects, $method, $validate_individual_objects = TRUE, $error_encountered = FALSE) {
-    $return = NULL;
-    $extra = $error_encountered ? ' while evaluating object-level error(s)' : '';
-    if (!is_array($result)) {
-      throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the 'result' part of the response is not an array.\nResponse result for $method call: " . json_encode($result), 101);
-    }
-    if (count($objects) != count($result)) {
-      throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the number of objects provided to the call (" . count($objects) . ") is different from the number of objects returned in the 'result' part of the response (" . count($result) . ").\nResponse result for $method call: " . json_encode($result), 102);
-    }
-    $index = 0;
-    foreach ($result as $i => $object_result) {
-      // We could live without the following if needed, but we need to clearly
-      // document how these indexes work then, to prevent bugs in other code.
-      if ($i !== $index) {
-        throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: result object was expected to have index $index; $i was found.\nResponse result for $method call: " . json_encode($result), 103);
-      }
-      if ($validate_individual_objects) {
-        $this->validateObjectResult($object_result);
-      }
-      $index++;
-    }
-  }
-
-  /**
    * Checks the format of an API result provided for a single object.
    *
    * create/update/delete method calls which operate on multiple objects, return
@@ -977,34 +391,6 @@ class SharpSpringRestClient {
    }
 
   /**
-   * Helper function to create a url containing the mandatory accountId and
-   * secretKey including the base url of REST API.
-   *
-   * @param array $query
-   *   Possible parameters for the url.
-   *
-   * @return string
-   */
-  private function createUrl(array $query = []) {
-    $base_query = [
-      'accountID' => $this->accountId,
-      'secretKey' => $this->secretKey
-    ];
-    if (!empty($query) && is_array($query)) {
-      $query = array_merge($base_query, $query);
-    }
-    else {
-      $query = $base_query;
-    }
-    $url = self::SHARPSPRING_BASE_URL;
-    if (!empty($query)) {
-      $url .= '?' . http_build_query($query);
-    }
-
-    return $url;
-  }
-
-  /**
    * Executes a REST API call with 'where', 'limit' and 'offset' parameters.
    *
    * @param string $method
@@ -1026,9 +412,9 @@ class SharpSpringRestClient {
    * @return array
    *   The substructure we expected in the JSON array.
    *
-   * @see $this->exec() for throws.
+   * @see $this->call() for throws.
    */
-  protected function execLimitedQuery($method, $single_result_key, array $where, $limit = NULL, $offset = NULL, $extra_params = []) {
+  protected function callLimited($method, $single_result_key, array $where, $limit = NULL, $offset = NULL, $extra_params = []) {
     $params = $extra_params;
     // API method definitions are inconsistent (according to the docs):
     // - most have 'where' defined as required, even when the value is empty
@@ -1050,7 +436,7 @@ class SharpSpringRestClient {
     if (isset($offset)) {
       $params['offset'] = $offset;
     }
-    return $this->exec($method, $params, ['single_result_key' => $single_result_key]);
+    return $this->call($method, $params, ['single_result_key' => $single_result_key]);
   }
 
   /**
@@ -1058,7 +444,7 @@ class SharpSpringRestClient {
    *
    * Where validation is lacking in the REST API, this function will do
    * validation and throw a SharpSpringRestApiException for invalid leads - but
-   * only after processing the valid leads. Like exec(), it will throw a
+   * only after processing the valid leads. Like call(), it will throw a
    * 'wrapper' exception if $throw_for_individual_object is false; it will
    * combine any invalid leads and REST API errors into the exception, as if all
    * of them were object-level errors from the REST API - except the error codes
@@ -1070,7 +456,7 @@ class SharpSpringRestClient {
    * @param string $method
    *   The REST API method to call.
    * @param bool $throw_for_individual_object
-   *   The 'throw_for_individual_object' key for $response_checks; see exec().
+   *   The 'throw_for_individual_object' key for $response_checks; see call().
    *   This may only be set if $leads contains exactly one lead.
    *
    * @return mixed
@@ -1141,7 +527,7 @@ class SharpSpringRestClient {
         'throw_for_individual_object' => $throw_for_individual_object,
       ];
       try {
-        $result = $this->exec($method, $params, $response_checks);
+        $result = $this->call($method, $params, $response_checks);
       }
       catch (SharpSpringRestApiException $e) {
         if ($e->getCode() || !$e->isObjectLevel() || !$invalid_leads) {
@@ -1396,7 +782,7 @@ class SharpSpringRestClient {
   public function deleteLead($id) {
     $params['objects'] = [];
     $params['objects'][] = ['id' => $id];
-    $result = $this->exec('deleteLeads', $params, [
+    $result = $this->call('deleteLeads', $params, [
       'single_result_key' => 'deletes',
       'validate_result_with_objects' => TRUE,
       'throw_for_individual_object' => TRUE,
@@ -1435,7 +821,7 @@ class SharpSpringRestClient {
     foreach ($ids as $id) {
       $params['objects'][] = ['id' => $id];
     }
-    return $this->exec('deleteLeads', $params, [
+    return $this->call('deleteLeads', $params, [
       'single_result_key' => 'deletes',
       'validate_result_with_objects' => TRUE,
     ]);
@@ -1480,7 +866,7 @@ class SharpSpringRestClient {
    */
   public function getLead($id, $options = []) {
     $params['id'] = $id;
-    $leads = $this->exec('getLead', $params, ['single_result_key' => 'lead']);
+    $leads = $this->call('getLead', $params, ['single_result_key' => 'lead']);
     // For some reason getLead returns an array of exactly one leads. Not sure
     // why that is useful. We'll just return the lead - but then we need to
     // first validate that we have exactly one.
@@ -1530,7 +916,7 @@ class SharpSpringRestClient {
    *   calls. See getLead() for comment on 'null string values'.
    */
   public function getLeads($where = [], $limit = NULL, $offset = NULL, $options = []) {
-    $leads = $this->execLimitedQuery('getLeads', 'lead', $where, $limit, $offset);
+    $leads = $this->callLimited('getLeads', 'lead', $where, $limit, $offset);
     if (!empty($options['fix_empty_leads'])) {
       foreach ($leads as $key => $lead) {
         if (!isset($lead['id'])) {
@@ -1584,7 +970,7 @@ class SharpSpringRestClient {
     $params['startDate'] = $start_date;
     $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
     $params['timestamp'] = $time_type;
-    return $this->execLimitedQuery('getLeadsDateRange', 'lead', [], $limit, $offset, $params);
+    return $this->callLimited('getLeadsDateRange', 'lead', [], $limit, $offset, $params);
   }
 
   /**
@@ -1599,7 +985,7 @@ class SharpSpringRestClient {
    *   An array of Field structures. (Note: no 'hasMore' indicator.)
    */
   public function getFields($limit = NULL, $offset = NULL) {
-    return $this->execLimitedQuery('getFields', 'field', [], $limit, $offset);
+    return $this->callLimited('getFields', 'field', [], $limit, $offset);
   }
 
   /**
@@ -1612,7 +998,7 @@ class SharpSpringRestClient {
    */
   public function getAccount($id) {
     $params['id'] = $id;
-    $result = $this->exec('getAccount', $params, ['single_result_key' => 'account']);
+    $result = $this->call('getAccount', $params, ['single_result_key' => 'account']);
     // For some reason getAccount returns an array of exactly one accounts.
     if (count($result) > 1) {
       throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'account' value contains more than one object.'\nResponse: " . json_encode($result), 16);
@@ -1636,7 +1022,7 @@ class SharpSpringRestClient {
    *   An array of Account structures. (Note: no 'hasMore' indicator.)
    */
   public function getAccounts(array $where = [], $limit = NULL, $offset = NULL) {
-    return $this->execLimitedQuery('getAccounts', 'account', $where, $limit, $offset);
+    return $this->callLimited('getAccounts', 'account', $where, $limit, $offset);
   }
 
   /**
@@ -1659,7 +1045,7 @@ class SharpSpringRestClient {
     $params['startDate'] = $start_date;
     $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
     $params['timestamp'] = $time_type;
-    return $this->exec('getAccountsDateRange', $params, ['single_result_key' => 'account']);
+    return $this->call('getAccountsDateRange', $params, ['single_result_key' => 'account']);
   }
 
   /**
@@ -1672,7 +1058,7 @@ class SharpSpringRestClient {
    */
   public function getCampaign($id) {
     $params['id'] = $id;
-    $result = $this->exec('getCampaign', $params, ['single_result_key' => 'campaign']);
+    $result = $this->call('getCampaign', $params, ['single_result_key' => 'campaign']);
     // For some reason getCampaign returns an array of exactly one accounts.
     if (count($result) > 1) {
       throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'campaign' value contains more than one object.'\nResponse: " . json_encode($result), 16);
@@ -1696,7 +1082,7 @@ class SharpSpringRestClient {
    *   An array of Campaign structures. (Note: no 'hasMore' indicator.)
    */
   public function getCampaigns(array $where = [], $limit = NULL, $offset = NULL) {
-    return $this->execLimitedQuery('getCampaigns', 'campaign', $where, $limit, $offset);
+    return $this->callLimited('getCampaigns', 'campaign', $where, $limit, $offset);
   }
 
   /**
@@ -1719,7 +1105,7 @@ class SharpSpringRestClient {
     $params['startDate'] = $start_date;
     $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
     $params['timestamp'] = $time_type;
-    return $this->exec('getCampaignsDateRange', $params, ['single_result_key' => 'campaign']);
+    return $this->call('getCampaignsDateRange', $params, ['single_result_key' => 'campaign']);
   }
 
   /**
@@ -1734,7 +1120,7 @@ class SharpSpringRestClient {
    * @todo single_result_key?
    */
   public function getClients() {
-    return $this->exec('getClients', []);
+    return $this->call('getClients', []);
   }
 
   /**
@@ -1747,7 +1133,7 @@ class SharpSpringRestClient {
    */
   public function getDealStage($id) {
     $params['id'] = $id;
-    $result = $this->exec('getDealStage', $params, ['single_result_key' => 'dealStage']);
+    $result = $this->call('getDealStage', $params, ['single_result_key' => 'dealStage']);
     // For some reason getDealStage returns an array of exactly one deal stages.
     if (count($result) > 1) {
       throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'dealStage' value contains more than one object.'\nResponse: " . json_encode($result), 16);
@@ -1772,7 +1158,7 @@ class SharpSpringRestClient {
    *   An array of DealStage structures.
    */
   public function getDealStages(array $where = [], $limit = NULL, $offset = NULL) {
-    return $this->execLimitedQuery('getDealStages', 'dealStage', $where, $limit, $offset);
+    return $this->callLimited('getDealStages', 'dealStage', $where, $limit, $offset);
   }
 
   /**
@@ -1795,7 +1181,7 @@ class SharpSpringRestClient {
     $params['startDate'] = $start_date;
     $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
     $params['timestamp'] = $time_type;
-    return $this->exec('getDealStagesDateRange', $params, ['single_result_key' => 'dealStage']);
+    return $this->call('getDealStagesDateRange', $params, ['single_result_key' => 'dealStage']);
   }
 
   /**
@@ -1822,7 +1208,7 @@ class SharpSpringRestClient {
     if (isset($id)) {
       $where['id'] = $id;
     }
-    return $this->execLimitedQuery('getActiveLists', 'activeList', $where, $limit, $offset);
+    return $this->callLimited('getActiveLists', 'activeList', $where, $limit, $offset);
   }
 
   /**
@@ -1846,7 +1232,7 @@ class SharpSpringRestClient {
    */
   public function getListMembers($id, $limit = NULL, $offset = NULL) {
     $where = ['id' => $id];
-    return $this->execLimitedQuery('getListMembers', '', $where, $limit, $offset);
+    return $this->callLimited('getListMembers', '', $where, $limit, $offset);
   }
 
   /**
@@ -1875,7 +1261,7 @@ class SharpSpringRestClient {
     if (isset($flag)) {
       $where['flag'] = $flag;
     }
-    return $this->execLimitedQuery('getRemovedListMembers', '', $where, $limit, $offset);
+    return $this->callLimited('getRemovedListMembers', '', $where, $limit, $offset);
   }
 
   /**
@@ -1890,7 +1276,7 @@ class SharpSpringRestClient {
    * @todo single_result_key?
    */
   public function getUnsubscribeCategories() {
-    return $this->exec('getUnsubscribeCategories', []);
+    return $this->call('getUnsubscribeCategories', []);
   }
 
 }

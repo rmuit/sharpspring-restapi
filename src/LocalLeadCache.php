@@ -59,9 +59,9 @@ class LocalLeadCache {
   /**
    * SharpSpring REST Client object.
    *
-   * @var \SharpSpring\RestApi\SharpSpringRestClient
+   * @var \SharpSpring\RestApi\Connection
    */
-  protected $sharpSpringClient;
+  protected $sharpSpringConnection;
 
   /**
    * The key-value store.
@@ -138,7 +138,7 @@ class LocalLeadCache {
    * locally before returning. (There does not seem to be a better place to do
    * this, though this might change later.)
    *
-   * @param \SharpSpring\RestApi\SharpSpringRestClient $rest_client
+   * @param \SharpSpring\RestApi\Connection $connection
    *   The SharpSpring REST Client.
    * @param object $key_value_store
    *   The key-value store. (Not type hinted because we have no formal spec.)
@@ -166,12 +166,12 @@ class LocalLeadCache {
    * @param \Psr\Log\LoggerInterface $logger
    *   (optional) A logger.
    */
-  public function __construct(SharpSpringRestClient $rest_client, $key_value_store, $refresh_cache_since, $foreign_key = NULL, array $cached_properties = [], LoggerInterface $logger = NULL) {
+  public function __construct(Connection $connection, $key_value_store, $refresh_cache_since, $foreign_key = NULL, array $cached_properties = [], LoggerInterface $logger = NULL) {
     // @todo generalize foreignKey so we can have more than one reverse-lookup
     // cache (besides e-mail)?
     $this->foreignKey = $foreign_key;
     $this->cachedProperties = $cached_properties;
-    $this->sharpSpringClient = $rest_client;
+    $this->sharpSpringConnection = $connection;
     $this->keyValueStore = $key_value_store;
     $this->logger = $logger;
 
@@ -244,7 +244,7 @@ class LocalLeadCache {
    *   If no IDs/email properties are set in the lead object.
    */
   public function compareLead($external_lead, $check_remotely = TRUE) {
-    $external_lead = $this->sharpSpringClient->toArray('lead', $external_lead);
+    $external_lead = $this->sharpSpringConnection->toArray('lead', $external_lead);
 
     // Matching to the Sharpspring lead object is done on Sharpspring ID if the
     // 'id' field is populated (though we don't expect it to be), otherwise on
@@ -466,7 +466,7 @@ class LocalLeadCache {
    *   a Lead object). Empty array if not found.
    */
   public function getLeadRemote($sharpspring_id) {
-    $lead = $this->sharpSpringClient->getLead($sharpspring_id);
+    $lead = $this->sharpSpringConnection->getLead($sharpspring_id);
     if ($lead) {
       $this->cacheLead($lead);
     }
@@ -504,7 +504,7 @@ class LocalLeadCache {
    *   API; not as Lead objects).
    */
   public function getLeads($where = [], $limit = NULL, $offset = NULL) {
-    $leads = $this->sharpSpringClient->getLeads($where, $limit, $offset);
+    $leads = $this->sharpSpringConnection->getLeads($where, $limit, $offset);
     if ($leads) {
       foreach ($leads as $lead) {
         $this->cacheLead($lead);
@@ -544,7 +544,7 @@ class LocalLeadCache {
    * @see Lead::$updateTimestamp
    */
   public function getLeadsDateRange($start_date, $end_date = '', $time_type = 'update', $limit = NULL, $offset = NULL) {
-    $leads = $this->sharpSpringClient->getLeadsDateRange($start_date, $end_date, $time_type, $limit, $offset);
+    $leads = $this->sharpSpringConnection->getLeadsDateRange($start_date, $end_date, $time_type, $limit, $offset);
     foreach ($leads as $lead) {
       $this->cacheLead($lead);
     }
@@ -561,8 +561,8 @@ class LocalLeadCache {
    *    [ 'success': TRUE, 'error': NULL, 'id': <ID OF THE CREATED LEAD> ]
    */
   public function createLead($lead) {
-    $result = $this->sharpSpringClient->createLead($lead);
-    $lead_array = $this->sharpSpringClient->toArray('lead', $lead);
+    $result = $this->sharpSpringConnection->createLead($lead);
+    $lead_array = $this->sharpSpringConnection->toArray('lead', $lead);
     $lead_array['id'] = $result['id'];
     $this->cacheLead($lead_array);
     return $result;
@@ -581,10 +581,10 @@ class LocalLeadCache {
    */
   public function createLeads(array $leads) {
     try {
-      $result = $this->sharpSpringClient->createLeads($leads);
+      $result = $this->sharpSpringConnection->createLeads($leads);
       // All leads have been successfully created.
       foreach (array_values($leads) as $i => $lead) {
-        $lead_array = $this->sharpSpringClient->toArray('lead', $lead);
+        $lead_array = $this->sharpSpringConnection->toArray('lead', $lead);
         $lead_array['id'] = $result[$i]['id'];
         $this->cacheLead($lead_array);
       }
@@ -597,7 +597,7 @@ class LocalLeadCache {
         $leads = array_values($leads);
         foreach ($e->getData() as $i => $object_result) {
           if (!empty($object_result['success'])) {
-            $this->cacheLead($this->sharpSpringClient->toArray('lead', $leads[$i]));
+            $this->cacheLead($this->sharpSpringConnection->toArray('lead', $leads[$i]));
           }
         }
       }
@@ -619,11 +619,11 @@ class LocalLeadCache {
    *   extends its functionality, like createLead where it returns extra info.)
    */
   public function updateLead($lead) {
-    $result = $this->sharpSpringClient->updateLead($lead);
+    $result = $this->sharpSpringConnection->updateLead($lead);
     // Because the lead does not necessarily have all properties, merge it into
     // the originally cached one. The lead has either an e-mail address or a
     // Sharpspring ID; otherwise it would have thrown an exception.
-    $lead = $this->sharpSpringClient->toArray('lead', $lead);
+    $lead = $this->sharpSpringConnection->toArray('lead', $lead);
     $orig_lead = !empty($lead['id']) ? $this->getLead($lead['id'], FALSE) : $this->getLeadsByEmail($lead['emailAddress'], FALSE);
     $lead = array_merge($orig_lead, $lead);
     $this->cacheLead($lead);
@@ -652,13 +652,13 @@ class LocalLeadCache {
    */
   public function updateLeads(array $leads) {
     try {
-      $result = $this->sharpSpringClient->updateLeads($leads);
+      $result = $this->sharpSpringConnection->updateLeads($leads);
       // All leads have been successfully updated.
       foreach ($leads as $lead) {
         // Because the lead does not necessarily have all properties, merge it into
         // the originally cached one. The lead has either an e-mail address or a
         // Sharpspring ID; otherwise it would have thrown an exception.
-        $lead = $this->sharpSpringClient->toArray('lead', $lead);
+        $lead = $this->sharpSpringConnection->toArray('lead', $lead);
         $orig_lead = !empty($lead['id']) ? $this->getLead($lead['id'], FALSE) : $this->getLeadsByEmail($lead['emailAddress'], FALSE);
         $lead = array_merge($orig_lead, $lead);
         $this->cacheLead($lead);
@@ -672,7 +672,7 @@ class LocalLeadCache {
         $leads = array_values($leads);
         foreach ($e->getData() as $i => $object_result) {
           if (!empty($object_result['success'])) {
-            $lead = $this->sharpSpringClient->toArray('lead', $leads[$i]);
+            $lead = $this->sharpSpringConnection->toArray('lead', $leads[$i]);
             $orig_lead = !empty($lead['id']) ? $this->getLead($lead['id'], FALSE) : $this->getLeadsByEmail($lead['emailAddress'], FALSE);
             $lead = array_merge($orig_lead, $lead);
             $this->cacheLead($lead);
@@ -697,7 +697,7 @@ class LocalLeadCache {
    *   extends its functionality, like createLead where it returns extra info.)
    */
   public function deleteLead($id) {
-    $result = $this->sharpSpringClient->deleteLead($id);
+    $result = $this->sharpSpringConnection->deleteLead($id);
     $this->keyValueStore->delete($id);
     return $result;
   }
@@ -722,7 +722,7 @@ class LocalLeadCache {
    */
   public function deleteLeads(array $ids) {
     try {
-      $result = $this->sharpSpringClient->deleteLeads($ids);
+      $result = $this->sharpSpringConnection->deleteLeads($ids);
       // All leads have been successfully deleted.
       $this->keyValueStore->deleteMultiple($ids);
     }

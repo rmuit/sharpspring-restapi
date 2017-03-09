@@ -1,0 +1,1194 @@
+<?php
+
+namespace SharpSpring\RestApi\examples;
+
+use DrunkinsCronTab;
+use DrunkinsJob;
+use Exception;
+use RuntimeException;
+use SharpSpring\RestApi\Connection;
+use SharpSpring\RestApi\CurlClient;
+use SharpSpring\RestApi\LocalLeadCache;
+use SharpSpring\RestApi\SharpSpringRestApiException;
+
+/**
+ * Drunkins Job class to synchronize contacts into Sharpspring.
+ *
+ * This is suitable for:
+ * - one way synchronizations (where the 'source' system is supposed to hold
+ *   authorative data which is essentially mirrored in Sharpspring;
+ * - where the link between a source contact and a Sharpspring Lead is
+ *   established by the source contact's ID number being present in Sharpspring,
+ *   and the Sharpspring ID not in the source system. (Sharpspring leads without
+ *   source ID will be linked via their e-mail address, but having the source
+ *   ID in Sharpspring means that source contacts can change e-mail - so a link
+ *   through ID is preferred over a link through e-mail.)q
+ *
+ * start(), after fetching contacts from somewhere, has all kinds of checks on
+ * e.g. multiple contacts being created with duplicate e-mail addresses. See
+ * there.
+ *
+ * This job, like other Drunkins 'sync' jobs, is subject to race conditions: It
+ * will update items in processItem() even when these are updated by an external
+ * process after start() was run. (Basically this job is meant for situations
+ * where nothing else is supposed to update Sharpspring contact data, and/or
+ * for this job to be run overnight.)
+ */
+class SharpSpringSyncJob extends DrunkinsJob {
+
+  /* Settings in $this->settings, used by this class:
+   * - job_id:                   defined in parent
+   * - list_format:              defined in parent
+   * - opt_fetcher_timestamp:    defined in fetcher
+   * - fetcher_timestamp_ignore: defined in fetcher
+   * - sharpspring_api_account_id (string)
+   * - sharpspring_api_secret_key (string)
+   * - sharpspring_lead_custom_properties (array):
+   *   The custom properties for the leads.
+   * - doublecheck_sharpspring_remotely (boolean):
+   *   Doublecheck missing contacts in Sharpspring. See settingsForm description
+   * - update_inactive: (not implemented yet. See settingsForm description.)
+   * - ss_leads_timestamp_from_date: see fetcher_timestamp_from_date.
+   * - ss_leads_timestamp_ignore: see fetcher_timestamp_ignore.
+   * - ss_leads_cache_unset_after_start (boolean):
+   *   If TRUE, unset the LocalLeadsCache object (which is kept in the context
+   *   otherwise), after determining which leads to create/update in start().
+   *   The advantage to this is it is less expensive in terms of memory usage
+   *   and (un)serializing the context that gets stored in between processItem()
+   *   calls. The disadvantage is the cache is not updated, so a next job run
+   *   will have to reinitialize the local cache by fetching all leads from
+   *   Sharpspring again. This setting is not present in the settingsForm.
+   */
+
+  /**
+   * Schedule (cron expression) for fully refreshing the key-value store.
+   *
+   * Having a key-value store introduces risks of skipping updates**, by
+   * definition. (Or doing too many updates, but that does not have big
+   * consequences except having to deal with Sharpspring's "302 no-op failure".)
+   * So we want to purge and repopulate the whole key-value store every once in
+   * a while.
+   *
+   * ** If the updated source object is equal to the cached Lead in the
+   * key-value store but the actual Sharpspring lead has a different value.
+   * Possible situations could be:
+   * - Somehow the Lead was not updated in Sharpspring (because it returned a
+   *   false 'success' response? Unfortunately Sharpspring does that) so the
+   *   update was only done in the key-value store, preventing a current
+   *   'essentially-no-op update' in the source system from going through and
+   *   rectifying the situation;
+   * - An update was done manually in Sharpspring, and further 'essentially-no-
+   *   op updates' in the source system will not overwrite the manual changes.
+   *   (In our case where the sync is explicitly one-way only, this seems like
+   *   "not really our problem / we can't do this right anyway".)
+   *
+   * We should probably base our value on the likelihood of the first thing
+   * happening. Setting to twice a month.
+   */
+  const KEYVALUE_REFRESH_SCHEDULE = '2 3 12,27 * *';
+  //@todo wait a minute, this will probably time out on cron. Haven't implemented it yet.
+
+  /**
+   * Overlap period (in seconds) from previous update.
+   *
+   * We should set this to the number of seconds during which we do not trust
+   * an update to show up in the getLeadsDateRange. (If the REST API is perfect,
+   * and updates show up immediately, this is 0.) 50 is on the high side.
+   *
+   * NOTES:
+   * - once it becomes possible for start() to start looping, it's detrimental
+   *   for this to be too high.
+   * - suppose there is a need for this to be >0 (because updates don't hit
+   *   Sharpspring immediately sometimes). Then you're going to see errors about
+   *   missing updates in finish(). In other words: if you never see those
+   *   errors, then this setting can be 0. (Or just a few seconds.)
+   */
+  const KEYVALUE_UPDATE_OVERLAP = 50;
+
+  /**
+   * The maximum number of leads to create/update in one Sharpspring API call.
+   */
+  const LEADS_UPDATE_LIMIT = 6;
+
+  /**
+   * Wait time in seconds after an update/creaete API call.
+   *
+   * This is because Sharpspring starts throwing "Service temporarily
+   * unavailable, try again in a few minutes" errors if you make too many
+   * consecutive updates. It seems like the REST API is not actually done
+   * processing after it returns, so a synchronization can overload it.
+   */
+  const LEADS_UPDATE_WAIT = 0;
+
+  /**
+   * The key-value store implementation used for our leads cache.
+   *
+   * Type name is an indicator / for IDE help. There is no formal interface spec
+   * yet so the type name may change (without changing behavior).
+   *
+   * @var \SharpSpring\RestApi\examples\Drupal7SqlStorage
+   */
+  protected $keyValueStore;
+
+  /**
+   * Sharpspring Connection object.
+   *
+   * This will probably only be used in start() to initialize the leads cache;
+   * afterwards, the cache will be used as a 'proxy' connection object.
+   *
+   * @var \SharpSpring\RestApi\Connection
+   */
+  protected $sharpSpringConnection;
+
+  /**
+   * A quick place to store logs because I didn't want to duplicate commands.
+   */
+  protected $temporaryLogs;
+
+  /**
+   * Constructor function. Sets up the necessary settings.
+   */
+  public function __construct(array $settings = array()) {
+
+    // Settings necessary for this job to function, so they are hardcoded here
+    // instead of requiring them in hook_queue_info:
+    //
+    // We need a running timestamp (or a 'fetcher_timestamp_from_date' setting),
+    // which is enabled with the following:
+    if (!isset($settings['opt_fetcher_timestamp'])) {
+      $settings['opt_fetcher_timestamp'] = TRUE;
+    }
+
+    // See comment below;
+    $settings['afas_include_empty_fields'] = TRUE;
+
+    // There's also incompatibility between fetcher_timestamp_ignore (being off)
+    // and caching of items, but we want to solve that differently in start()
+    // vs settingsForm(Submit)(), so see there.
+
+    parent::__construct($settings);
+  }
+
+  /**
+   * settingsForm(); not part of interface definition; may move to own UI class.
+   *
+   * It's up to the caller to collect these settings and pass them as the
+   * constructor's $settings argument, after which other code can access them.
+   * (drunkins module takes care of this.)
+   */
+  public function settingsForm() {
+    $form = parent::settingsForm();
+
+    // Rolling timestamp and item caching does not work together because of the
+    // fact that we do two separate fetches. Disable using cached items if
+    // 'ignore' is off - like start() does. Notes on this:
+    // - we are not disabling 'caching items' if we currently don't have any
+    //   items cached (in which case the control is $form['cache_items'])
+    // - this is opposite from jobs' default behavior, which is to ignore the
+    //   rolling timestamp functionality if we have cached items.
+    // - the logic w.r.t sometimes disabling 'cache_items' and sometimes
+    //   'fetcher_timestamp_ignore' makes for an icky issue on form submit; see
+    //   settingsFormSubmit() and start().
+    if (isset($form['selection']['cache_items']['#default_value'])) {
+      $form['selection']['cache_items']['#states']['enabled'][':input[name="fetcher_timestamp_ignore"]'] =  array('checked' => TRUE);
+      // Unlike in start(), _if_ items are cached then we want to make this
+      // visible in the checkbox. (Also, if we did not do this, then the above
+      // #states addition means that 'cache_items' & 'fetcher_timestamp_ignore'
+      // are keeping each other in deadlock; both disabled.) Notes:
+      // - this means that the form does *not* represent the situation when
+      //   you'd start the job through other mechanisms than this form.
+      // - check cached items by form value, not setting value like parent does.
+      if ($form['selection']['cache_items']['#default_value'] == 2) {
+        $form['selection']['fetcher_timestamp_ignore']['#default_value'] = TRUE;
+      }
+    }
+
+    $form['doublecheck_sharpspring_remotely'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Doublecheck missing contacts in Sharpspring'),
+      '#description' => t("This is necessary if there are inactive contacts in your Sharpspring dataset (because these won't be in the local cache). If you do, and this option is not checked, the synchronization will try to create new Leads for e-mail addresses that are already there, and get errors. On the other hand, if this option is checked it will cause a (often) unnecessary call to Sharpspring for each contact that is not found in the cache, e.g. for new contacts. When there are a bunch of those, this seems likely to cause a temporary block (resulting in timeouts) from the REST API."),
+      '#default_value' => !empty($this->settings['doublecheck_sharpspring_remotely']),
+      '#states' => array('enabled' => array(':input[name="fetcher_timestamp_ignore"]' => array('checked' => FALSE))),
+    );
+    $form['selection']['fetcher_timestamp_ignore']['#title'] .= '. ' . t(' This will also disable Sharpspring contacts which are not found in ths source system anymore. (This will ignore "Doublecheck missing contacts" because that would just generate too many useless calls (and possibly exceed request quota), for all disabled contacts in the full source data set.)');
+
+    $form['update_inactive'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Update data of inactive contacts in Sharpspring'),
+      '#description' => t("If unchecked, then contacts which are marked as inactive in both Source and Sharpspring will not (necessarily) have their details updated anymore. 'Checked' IS NOT IMPLEMENTED. (Yet?)"),
+      '#default_value' => !empty($this->settings['update_inactive']),
+      '#disabled' => TRUE,
+    );
+
+    // Extra selectors to make explicit the fact that we also get items from
+    // Sharpspring.
+
+    $last_update = variable_get($this->settings['job_id'] . '_ts_kvupdate', 0);
+    $last_update_str = '';
+    if ($last_update) {
+      // Overlap is number of seconds to go back from last recorded timestamp.
+      // Note different format, and different timezone (UTC) than the regular
+      // timestamp.
+      $last_update_str = gmdate('Y-m-d H:i:s', $last_update - static::KEYVALUE_UPDATE_OVERLAP);
+    }
+    $form['selection']['leads'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Local leads cache'),
+      '#description' => t('We have Sharpspring Leads cached in a local key-value store to minimize API calls. This is completely separate from the above fetched/cached Source items.'),
+      '#weight' => 4,
+    );
+    $form['selection']['leads']['ss_leads_timestamp_from_date'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Refresh leads cache with items changed in Sharpspring since'),
+      '#description' => 'Enter "-" to skip refreshing the leads cache altogether. Date format is Y-m-d H:i:s only! The time is expressed in UTC. (This is different than above; this literal value is used as an argument to a Sharpapring API call.)',
+      '#required' => TRUE,
+      '#default_value' => $last_update_str,
+      '#weight' => 1,
+      '#states' => array('enabled' => array(
+        ':input[name="ss_leads_timestamp_ignore"]' => array('checked' => FALSE),
+        // No states connected to cache_items, because otherwise refreshing the
+        // leads cache would not be possible (if we took "-" as the default when
+        // we use cached items.) The disadvantage is that now we HAVE to
+        // manually enter "-" each time, if we want to skip fetching from
+        // Sharpspring.
+//        ':input[name="cache_items"]' => array('!value' => '2'),
+      )),
+    );
+    $form['selection']['leads']['ss_leads_timestamp_ignore'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Ignore "items changed in Sharpspring since"; refresh full cache.'),
+      '#default_value' => empty($last_update),
+      '#weight' => 2,
+//      '#states' => array('enabled' => array(':input[name="cache_items"]' => array('!value' => '2'))),
+    );
+    if (!empty($last_update)) {
+      // Check if we should do a full refresh.
+      $calculator = new DrunkinsCronTab(static::KEYVALUE_REFRESH_SCHEDULE);
+      $next = $calculator->nextTime($last_update);
+      if ($next <= time()) {
+        $form['selection']['ss_leads_timestamp_ignore']['#description'] = "<em>According to the schedule, it's time for a new update!</em>";
+        $form['selection']['ss_leads_timestamp_ignore']['#default_value'] = TRUE;
+      }
+    }
+
+    $form['logging_display'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Logging / display'),
+      '#description' => t('These options govern logging with the "Start batch" action, and display/visibility of items with the "Display" action.'),
+      '#weight' => 14,
+    );
+    // We always want to log clashes for incremental updates - partly because
+    // we want the default to be TRUE in non-interactive runs.
+    $form['logging_display']['log_include_clashes'] = array(
+      '#type' => 'checkbox',
+      '#title' => t("Log about / include inactive items that won't be sent because they are duplicates of another active contact (action code 1)"),
+      '#description' => t('True if "changed since" is not ignored.'),
+      '#weight' => 1,
+      '#states' => array('enabled' => array(
+        ':input[name="fetcher_timestamp_ignore"]' => array('checked' => TRUE),
+      )),
+    );
+    // - noops are only doing anythying when displaying items.
+    // - We want to be able to select the option from the UI for both full and
+    //   time-incremental runs.
+    // - We have a slight preference for having default TRUE for incremental
+    //   runs; it only makes a difference for "Display" but then we won't
+    //   wrongly assume from he "No items to process" message that there were in
+    //   fact no source updates. This however means that for full updates, the
+    //   default is also TRUE. We may reevaluate later.
+    $form['logging_display']['log_include_noops'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Display leads that are already up to date (action code 10)'),
+      '#description' => t('This does nothing with the "Start batch" action.'),
+      '#default_value' => TRUE,
+      '#weight' => 2,
+    );
+    return $form;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function settingsFormSubmit($op) {
+    // Fix the 'cache_items' value if it is not submitted because the radios are
+    // disabled. In this case, $this->settings['cache_items'] == 2 (from the
+    // form_state value, which comes from #default_value), which will have
+    // unwanted effects in start().
+    if (!isset($_POST['cache_items']) && $this->settings['cache_items'] == '2') {
+      $this->settings['cache_items'] = 0;
+    }
+    return parent::settingsFormSubmit($op);
+  }
+
+  /**
+   * Detects whether this class is started manually from the UI (i.e. not cron).
+   *
+   * Once there is a better way, this can be replaced.
+   *
+   * @return bool
+   */
+  protected function isStartedFromUI() {
+    // I can't think of a better way to determine 'run from ui' than
+    // checking for a setting that is only used in the settingsForm.
+    return isset($this->settings['log_include_noops']);
+  }
+
+  /**
+   * Fetches/prepares items, returns them to be queued for processItem().
+   */
+  public function start(array &$context) {
+    // Fix the 'fetcher_timestamp_ignore' value if a UI form is submitted
+    // without this value, because the checkbox is disabled. (This happens if we
+    // are processing cached items per the parent form definition). Forcing it
+    // to be TRUE is impossible in settingsForm() as long as we don't pass
+    // $form_state there / have 'proper' form-submit functionality, so do it
+    // here. This however is sub-ideal because it means the value will differ
+    // in finish(), which is bug-prone. Check _GET too, because of the 'Display
+    // items' functionality (but note that we first needed to fix 'cache_items'
+    // in settingsFormSubmit()).
+    if (isset($_POST['cache_items']) || isset($_GET['cache_items']) && $this->settings['cache_items'] == '2') {
+      $this->settings['fetcher_timestamp_ignore'] = TRUE;
+    }
+
+    // Rolling timestamp and item caching does not work together because of the
+    // fact that we do two separate fetches.
+    if (empty($this->settings['fetcher_timestamp_ignore'])) {
+      $this->settings['cache_items'] = 0;
+    }
+
+    // Only initialize $context if run for the first time. (We could modify
+    // start() to fetch items in batches and be called repeatedly; in that case
+    // this is necessary. The isset() is an arbitrary check.)
+    if (!isset($context['sent'])) {
+      $context += array(
+        'sent' => array(),
+        // Errors in processItem().
+        'error' => array(),
+        // Skipped in start() because of errors (e.g. missing e-mail) or update
+        // clashes.
+        'skipped' => array(),
+        // Skipped in start() because equal to Sharpspring contact.
+        'equal' => array(),
+        // Skipped in start() because inactive.
+        'inactive' => array(),
+        // Skipped in start() because inactive duplicate of another contact.
+        // (Difference with 'skipped': we don't care about them.)
+        'dupes_ignored' => array(),
+        // Deactivated because removed from the source system. This is a subset
+        // of 'sent'/'error', i.e. only the above categories add up to the total
+        // items processed; this category is not part of it.
+        'remove' => array(),
+      );
+    }
+    
+    // Initialize cache for Leads.
+    if (!empty($this->settings['ss_leads_timestamp_ignore'])) {
+      $refresh_since = '';
+    }
+    elseif (!empty($this->settings['ss_leads_timestamp_from_date'])) {
+      $refresh_since = $this->settings['ss_leads_timestamp_from_date'];
+      if ($refresh_since === '--') {
+        // This is too dangerous (and could be a typo when '-' was meant);
+        throw new \RuntimeException("'ss_leads_timestamp_from_date' setting cannot be '--'.");
+      }
+    }
+    else {
+      // For the variable names we assume that the job IDs include the module
+      // name and will therefore be namespaced alreaady.
+      $last_update = variable_get($this->settings['job_id'] . '_ts_kvupdate', 0);
+      $refresh_since = '';
+      if ($last_update) {
+        $refresh_since = gmdate('Y-m-d H:i:s', $last_update - static::KEYVALUE_UPDATE_OVERLAP);
+        // Check the cron schedule to see if a full refresh is due.
+        // @todo We should refresh from cron too, not only UI. But how? Isn't this too expensive?
+        if ($this->isStartedFromUI()) {
+          $calculator = new DrunkinsCronTab(static::KEYVALUE_REFRESH_SCHEDULE);
+          $next = $calculator->nextTime($last_update);
+          if ($next <= time()) {
+            $refresh_since = '';
+          }
+        }
+      }
+    }
+    // Get new timestamp before we start fetching data from Sharpspring.
+    $new_timestamp = time();
+    $leads_cache = new LocalLeadCache(
+      $this->getSharpSpring(),
+      $this->getKeyValueStore(),
+      $refresh_since,
+      $this->settings['sharpspring_lead_custom_properties']['sourceId'],
+      array(),
+      psr3_logger('sharpspring_sync', $this->isStartedFromUI() ? array() : array('dsm' => NULL))
+    );
+    // @todo we could build an option to fetch only X leads from Sharpspring at
+    //   a time (using $refresh_since = '--'), to prevent timeouts - i.e. to set
+    //   $context['process_more'] / $context['ss_leads_cache'] and return here,
+    //   which means start() will be called again to fetch the rest. The issue
+    //   with that is, we don't know how long the wait will be so the result
+    //   from the next call to Sharpspring getLeads(DateRange) we would make
+    //   here (with an offset parameter) isn't really guaranteed to exactly
+    //   match the earlier ones.
+    // @todo and this doesn't make much sense unless we also implement this kind
+    //   of 'paging' for the source system.
+    if ($refresh_since !== '-' && $refresh_since !== '--') {
+      variable_set($this->settings['job_id'] . '_ts_kvupdate', $new_timestamp);
+    }
+
+    // Preprocess the deduped items. We'll go through all items and check if any
+    // of the updates 'clash'. The reason for this are possible edge cases that
+    // we want to catch, which are influenced by our setup where
+    // - the source item does not have the Sharpspring ID; only the Sharpspring
+    //   item has the source ID as a 'foreign key';
+    // - in Sharpspring, the e-mail address is unique; in the source it isn't;
+    // - the source item can be 'linked' to an existing Sharpspring item by
+    //   either the source id == foreign key, or by e-mail (in order of
+    //   preference, by compareLead()).
+    // - there can be multiple items with the same foreign key in Sharpspring.
+    //   (Hopefully not, but there is nothing stopping it. The 'linked' lead
+    //   for a compared source item will be either the one that is completely
+    //   equal, or the 'first' lead, for whatever definition of first.)
+    // Descriptions of edge cases we've thought of so far:
+    // 1)
+    // The source system turns off Sharpspring-sync for one contact and turns it
+    // on for another with the same e-mail address, the same time: the former
+    // should be canceled (and the latter will just get seen as an update, that
+    // happens to change the source-foreign-key too).
+    // 2)
+    // If one source item changes e-mail address and another one creates a new
+    // record with the old e-mail address, we should treat it as such. That is:
+    // - despite the fact that our compareLead() check would link the 'create'
+    //   operation to the same item in Sharpspring, we should disregard that
+    // - we should make sure that the change of e-mail gets processed first.
+    // 3)
+    // Chained e-mail changes. If source item changes e-mail address and then
+    // source item #2 changes e-mail to #1... the order of execution matters:
+    // the above works, but executing #2 before #1 will yield an error. Worse,
+    // actually: on API v1.117 the update will fail silently while reporting
+    // success. So _depending on the order_, we should cancel rename #2. (This
+    // happens to be more straightforward than always canceling #2; see below.)
+    // 4)
+    // If there are two contacts with the same e-mail address in the source
+    // system which are synced to Sharpspring, the Lead in Sharpspring will
+    // likely 'flip-flop':
+    // - source contact 1 gets updated/synchronized: the Sharpspring lead will
+    //   be updated (including the source ID);
+    // - source contact 2 gets synchronized: (assuming this source ID does not
+    //   exist in Sharpspring yet, with whatever e-mail address,) this update
+    //   will 'steal' the same Sharpspring contact**, meaning the source ID gets
+    //   updated to 2, and 1 won't exist anymore in Sharpspring
+    // - source contact 1 gets updated: 'steals' the same Sharpspring contact
+    //   again... etc.
+    // ** This will happen as long as the e-mail address from both source
+    // contacts stays the same. Apparently no two contacts with the same e-mail
+    // can exist in Sharpspring, luckily.
+    // To build at least partial detection of these flip-flops (that is, at
+    // least within the dataset that we are preprocessing right now), we don't
+    // want to process two items that would update the same Sharpspring lead, so
+    // we built detection / logging of 'clashes'.
+    //
+    // During preprocessing, we create structures with 3 values: a lead object
+    // constructed from source data (i.e. no Sharpspring ID yet), the ID for the
+    // linked Sharpspring lead and a code that signifies the action to take on
+    // the lead (which can change as we preprocess more leads) Codes are:
+    // 1 - do not update because already-inactive duplicate (clash) of another
+    //     contact. (The difference with 2 is we don't care about logging this.)
+    // 2 - do not update because of same-target-sharpspring-lead clash.
+    // 3 - do not update because of invalid data. (In practice: empty e-mail.)
+    // 5 - update to be inactive **
+    // 6 - new creation (implying no existing lead in Sharpspring has either
+    //     the source ID or the e-mail address)
+    // 7 - update that changes source ID (implying e-mail stays the same;
+    //     otherwise it would not be 'linked' to the Sharpspring contact)
+    // 8 - update that changes e-mail (implying source ID stays the same)
+    // 9 - update that does not change source ID or e-mail
+    // 10- do not update because compared contacts are equal
+    // Values are ordered in a way that if we discover two leads would update
+    // the same lead in Sharpspring, the higher one 'wins'. Value 1/5 won't get
+    // log messages about 'clashing' items; value 1/2/3 won't get queued. Not
+    // in this list: updates of items which are already inactive in Sharpspring;
+    // those get skipped without any need for clash detection.
+    //
+    // Things worth keeping in mind if this logic gets tweaked later:
+    // - creates can never 'clash' with updates
+    // - the ordering of importance is based on what I figured would be good to
+    //   tackle the above documented edge cases. (I'm not sure if I documented
+    //   everything)
+    // - 7 and 8 'change the game': if the compareLead() call were made after
+    //   updates of these types were done... the outcome might be different.
+    //   We don't do anything with this fact here though (except dealing with
+    //   above edge case 2 which is a clash between types 7 and 8); it's just a
+    //   note.
+    //
+    // ** value 4 is not used in the loop below; it is used later to signify
+    //    items that are deactivated because their corresponding source item
+    //    does not exist anymore. This needs to be accounted for separately from
+    //    code 5. (Which doesn't mean it needs to get a different code because
+    //    those are only temporary... but since we show these codes in "Display
+    //    items", displaying a special code there generates less confusion.)
+    $preprocessed_items = $seen_source_ids = $seen_ss_ids = $seen_emails = $this->temporaryLogs = array();
+    $lead_key = 0;
+    $field_source_id = $this->settings['sharpspring_lead_custom_properties']['sourceId'];
+    // If the job configuration contains a separate fetcher, parent::start()
+    // will return items from it.
+    foreach (parent::start($context) as $fetched_item) {
+      // Remember the source ID, if we are checking for deleted ones.
+      if (!$this->processingIncrementalFromDate()) {
+        $seen_source_ids[$fetched_item['id']] = TRUE;
+      }
+
+      $lead = $this->convertToLead($fetched_item);
+      // Some items (e.g. incomplete leads, with missing e-mail) we still want
+      // to run through below comparison and duplicate-checking. But if we got
+      // nothing returned, this means there is no possibility for even that.
+      // We'll assume the error was logged and just discard it.
+      if (!$lead) {
+        $context['skipped'][] = $fetched_item['id'];
+        continue;
+      }
+      $lead_action_code = 0;
+      if (empty($lead->emailAddress)) {
+        // Don't log inactive contacts without e-mail; that's too useless.
+        if (!empty($lead->active)) {
+          $this->logAndStore('Missing e-mail address for contact, skipping: @c', array('@c' => $this->getLeadDescription($lead)), WATCHDOG_ERROR);
+        }
+        // We're still going ahead with the comparison/checking because we want
+        // to get a notification if another source item updates the same
+        // Sharpspring ID. (Then the user will know they can just disable this
+        // item.)
+        $lead_action_code = 3;
+      }
+
+      // Compare the lead against our Sharpspring leads cache.
+      $lead->leadStatus = 'contact';
+      $compare = $leads_cache->compareLead($lead, !empty($this->settings['doublecheck_sharpspring_remotely']));
+      if (isset($compare['leadStatus']) && $compare['leadStatus'] === 'contactWithOpp') {
+        // We set this leadStatus because we want to update it to 'contact' -
+        // except if it is equal to contactWithOpp now; then we cannot update it
+        // so if this is the only difference, the lead is actually 'equal'.
+        unset($compare['leadStatus']);
+      }
+
+      // Check what we would do with this lead, if there were no 'clashes'.
+      if (!$compare) {
+        if (empty($lead->active)) {
+          // An inactive lead does not need to be recorded for dupe checking.
+          $context['inactive'][] = $fetched_item['id'];
+          continue;
+        }
+        // Create new lead, unless there was an error.
+        $lead_action_code = $lead_action_code ?: 6;
+      }
+      else {
+        if (empty($lead->active)) {
+          if (empty($compare['active'])) {
+            // An inactive-to-inactive update does not to be recorded for dupe
+            // checking. Errors have already been logged if necessary.
+            $context['inactive'][] = $fetched_item['id'];
+            continue;
+          }
+          // Deactivate. (Also if this has code 2 because no e-mail address;
+          // then we have an ID, so deactivating is possible.)
+          $lead_action_code = 5;
+        }
+        if (!$lead_action_code) {
+          // The active, non-error lead has a 'linked' lead in Sharpspring.
+          // Check what we want to do with it.
+          if (count($compare) == 1) {
+            // It's the same (at least all the fields we want to update from
+            // the source system are); skip.
+            $lead_action_code = 10;
+          }
+          // If 'emailAddress' key is not set in $compare, the existing address
+          // is equal to the $lead->emailAddress. (We already know that exists.)
+          elseif (array_key_exists('emailAddress', $compare)) {
+            $lead_action_code = 8;
+          }
+          // If {$field_source_id} key is set in $compare, we know the field
+          // exists in $lead AND it is not equal. If the field is not set in
+          // $lead, we classify it as 'equal to the current value' because that
+          // is how our update process works. (We assume the source field is not
+          // nullable.)
+          elseif (array_key_exists($field_source_id, $compare)) {
+            $lead_action_code = 7;
+          }
+          else {
+            $lead_action_code = 9;
+          }
+        }
+
+        // Now check if
+        // - multiple source items would update the same Sharpspring lead
+        //   (not necessary for creates);
+        // - multiple source items have the same e-mail address. (It is possible
+        //   that this is not caught by the first check, in cases where e-mails
+        //   are changed and/or new items would be created with the same
+        //   (target) e-mail address.)
+        // 1) Check clashing target Sharpspring leads.
+        if ($lead_action_code > 2 && isset($seen_ss_ids[$compare['id']])) {
+          // Get the key in $preprocessed_items for the lead with the highest
+          // action-code. (There could be multiple, but there's maximum one that
+          // has not been set to 1 yet.)
+          $other_lead_key = $seen_ss_ids[$compare['id']];
+          $other_lead_code = $preprocessed_items[$other_lead_key][2];
+          // Special handling (documented above as edge case 2): change of
+          // e-mail and change of source ID of the same Sharpspring lead, should
+          // become change of e-mail plus new lead (executed in that order).
+          if ($lead_action_code == 7 && $other_lead_code == 8) {
+            $lead_action_code = 6;
+          }
+          elseif ($lead_action_code == 8 && $other_lead_code == 7) {
+            $preprocessed_items[$other_lead_key][2] = 6;
+          }
+          elseif ($other_lead_code > 2) {
+            if ($lead_action_code <= $other_lead_code) {
+              // If this is an update-to-be-inactive clashing with another
+              // non-error update: it turns out we can silently ignore this one.
+              // (This could be edge case 1 documented above, but is more likely
+              // to be a contact that is not in Sharpspring in the first place.)
+              if ($lead_action_code == 5) {
+                $lead_action_code = 1;
+              }
+              else {
+                // If this item had an error (nonexistent e-mail), we still log
+                // it as a clash.
+                $this->logCanceledUpdate($preprocessed_items[$other_lead_key][0], $lead, 'linked to the same Sharpspring contact');
+                $lead_action_code = 2;
+              }
+            }
+            else {
+              // Reverse of above.
+              if ($other_lead_code == 5) {
+                $preprocessed_items[$other_lead_key][2] = 1;
+              }
+              else {
+                $this->logCanceledUpdate($lead, $preprocessed_items[$other_lead_key][0], 'linked to the same Sharpspring contact');
+                $preprocessed_items[$other_lead_key][2] = 2;
+              }
+            }
+          }
+        }
+      }
+      // 2) Check clashing target (possibly changed) e-mail addresses, which
+      //    have not been picked up by the check on source ID in part 1. In
+      //    practice this kind of clash only happens for mail changes (which by
+      //    definition have a source ID) and/or creations. Mail changes get
+      //    preference; creations (or a second rename) should get canceled. Do
+      //    not check if this update was just canceled because of a clash above,
+      //    or if the e-mail address does not exist.
+      if ($lead_action_code > 2 && isset($lead->emailAddress) && isset($seen_emails[$lead->emailAddress])) {
+        // Same logic as above except we will not log if the other side is
+        // canceled - because that might have been done just before and we
+        // could be logging the same.
+        $other_lead_key = $seen_emails[$lead->emailAddress];
+        $other_lead_code = $preprocessed_items[$other_lead_key][2];
+        if ($other_lead_code > 2) {
+          if ($lead_action_code <= $other_lead_code) {
+            $this->logCanceledUpdate($preprocessed_items[$other_lead_key][0], $lead, 'with the same e-mail address');
+            $lead_action_code = 2;
+          }
+          else {
+            $this->logCanceledUpdate($lead, $preprocessed_items[$other_lead_key][0], 'with the same e-mail address');
+            $preprocessed_items[$other_lead_key][2] = 2;
+          }
+        }
+      }
+      // 2a) Check clashing source e-mails which will change with the update.
+      //     (Or _would_ change; we also check this for canceled e-mail
+      //     changes.)
+      if (!empty($compare['emailAddress']) && $compare['emailAddress'] != $lead->emailAddress && isset($seen_emails[$compare['emailAddress']])) {
+        // The 'start' address of the e-mail change clashes with another
+        // operation. If we get here, that can only be yet another rename. Since
+        // that would be processed before us, it would fail so we should cancel
+        // it. (This is edge case 3 documented above, and is indeed
+        // 'asymmetrical'; if the updates came in in reverse order, nothing
+        // would get canceled. Now we don't need to do more tricks and can keep
+        // the error message more to the point.)
+        $other_lead_key = $seen_emails[$compare['emailAddress']];
+        $other_lead_code = $preprocessed_items[$other_lead_key][2];
+        if ($other_lead_code > 3) {
+          $this->logAndStore('Source record @c1 is changing e-mail address and starts at address @e1. This clashes with another record, whose update we are skipping and which should be checked/processed manually: @c2',
+            array('@c1' => $this->getLeadDescription($lead), '@e1' => $compare['emailAddress'], '@c2' => $this->getLeadDescription($preprocessed_items[$other_lead_key][0])), WATCHDOG_WARNING);
+          $preprocessed_items[$other_lead_key][2] = 2;
+        }
+      }
+
+      // Now queue the lead up. Also if it's an error / clash, because we want
+      // to log all extra clashes with it explicitly. (These clashes won't
+      // cause different behavior but the user will at least see them.)
+      if (!$lead_action_code) {
+        throw new RuntimeException("Internal error (code should be changed): could not determine what to do with contact {$this->getLeadDescription($lead)}.");
+      }
+      else {
+        $preprocessed_items[$lead_key] = array($lead, $compare ? $compare['id'] : 0, $lead_action_code);
+        // Update the 'seen' caches. (We know that if we are >3, any existing
+        // lead referenced in there currently will have been set to 1 or 2.)
+        if ($compare && ($lead_action_code > 3 || !isset($seen_ss_ids[$compare['id']]))) {
+          $seen_ss_ids[$compare['id']] = $lead_key;
+        }
+        if (!empty($lead->emailAddress) && ($lead_action_code > 3 || !isset($seen_emails[$lead->emailAddress]))) {
+          $seen_emails[$lead->emailAddress] = $lead_key;
+        }
+        $lead_key++;
+      }
+    }
+    unset($seen_emails);
+    if (empty($this->settings['ss_leads_cache_unset_after_start'])) {
+      $context['ss_leads_cache'] = $leads_cache;
+    }
+    unset($leads_cache);
+
+    // If we have a full source data set, check if some source items are not
+    // seen anymore. If not, the Sharpspring contacts should be deactivated.
+    if (!$this->processingIncrementalFromDate()) {
+      $offset = 0;
+      do {
+        $leads = $this->getKeyValueStore()->getAllBatched(1024, $offset);
+        foreach ($leads as $lead_array) {
+          // Checking if an item is 'seen in the source system' is done by
+          // checking all items we've processed so far (which will also catch
+          // items that will be 'renumbered' but not items that were skipped
+          // above), plus all source IDs collected.
+          if (!isset($seen_ss_ids[$lead_array['id']])
+              && !empty($lead_array[$field_source_id]) && !isset($seen_source_ids[$lead_array[$field_source_id]])
+              && !empty($lead_array['active'])
+              && isset($lead_array['leadStatus']) && ($lead_array['leadStatus'] === 'contact' || $lead_array['leadStatus'] === 'contactWithOpp')
+          ) {
+            // This should be deactivated, and accounted for separately.
+            $context['remove'][] = $lead_array[$field_source_id];
+            // It's strange to convert this lead into an object but that way we
+            // can keep the below code the same (in the 'display' as well as
+            // 'process' case).
+            $lead = new LeadWithSourceId($lead_array, $this->settings['sharpspring_lead_custom_properties']);
+            // Use code 4 which was not used above.
+            $preprocessed_items[] = array($lead, $lead_array['id'], 4);
+          }
+        }
+        $offset = count($leads) == 1024 ? $offset + 1024 : 0;
+      } while ($offset);
+    }
+    unset($seen_ss_ids);
+    unset($seen_source_ids);
+
+    // Now that we know all action codes, we can construct the items for
+    // processing. Make separate groups for creates and updates.
+    $items = array();
+    if (!empty($this->settings['list_format'])) {
+      // @todo not in this class, but an idea for a runner/UI: it would be
+      // awesome to have a custom list function that can print the changed
+      // values in bold, because we already know what values were changed (if
+      // code 5/6/7 at least).
+      $include_noops = !empty($this->settings['log_include_noops']) || $this->processingIncrementalFromDate();
+      $include_clashes = !empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate();
+      foreach ($preprocessed_items as $item) {
+        if (($item[2] != 10 || $include_noops)
+            && ($item[2] != 1 || $include_clashes)) {
+          // We just converted the array to an object; now back to an array...
+          // (If this does not map the properties back to system field names,
+          // that's OK.) The user won't know the action codes, but whatever.
+          $items[] = $item[0]->toArray() + array('*updated' => $item[0]->_source_last_update, '*ssid' => $item[1], '*action code' => $item[2]);
+        }
+      }
+      unset($preprocessed_items);
+    }
+    else {
+      $creates = array();
+      foreach ($preprocessed_items as $item) {
+        switch ($item[2]) {
+          case 1:
+            $context['dupes_ignored'][] = $item[0]->sourceId;
+            break;
+          case 2:
+          case 3:
+            $context['skipped'][] = $item[0]->sourceId;
+            break;
+          case 10:
+            $context['equal'][] = $item[0]->sourceId;
+            break;
+          case 6:
+            // Doublecheck: code 5 must be creates.
+            if ($item[1]) {
+              throw new RuntimeException("Internal error (code should be changed): Item is marked as create but still has a Sharpspring ID $item[1]: {$item[0]}.");
+            }
+            $creates[] = $item[0];
+            break;
+          default:
+            // Doublecheck: must be updates.
+            if (!$item[1]) {
+              throw new RuntimeException("Internal error (code should be changed): Item is marked as update but still has no Sharpspring ID: {$item[0]}.");
+            }
+            $item[0]->id = $item[1];
+            $items[] =  $item[0];
+        }
+      }
+      unset($preprocessed_items);
+
+      // One big operation, to not reference 2 big arrays with 2 variables.
+      // Do updates before creations because it minimizes the chance of clashes
+      // if an update changes e-mail address; see above.
+      $items = array_merge(
+        empty($items) ? array() : array_chunk($items, self::LEADS_UPDATE_LIMIT),
+        empty($creates) ? array() : array_chunk($creates, self::LEADS_UPDATE_LIMIT)
+      );
+
+      // Mail the user beforehand about errors that were not queued, not at
+      // finish(), in case the sync process gets hopelessly stuck.
+      if ($context['skipped']
+          // This line is also in logCanceledUpdate():
+          && (!empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate())
+          && !$this->isStartedFromUI()) {
+        drupal_mail('ict_comm', 'sync_skipped', variable_get("ict_comm_afas_comm_error_mail", 'roderik@yellowgrape.nl'), language_default(), array('nr_warnings' => count($context['skipped']), 'logs' => $this->temporaryLogs));
+      }
+
+      // Set start timestamp which we'll use in finish(). (We set our own so it
+      // is independent of opt_fetcher_timestamp setting.)
+      $context['ict_start_updates'] = time();
+    }
+
+    return $items;
+  }
+
+
+  /**
+   * Log about a lead not being updated because of another coinciding update.
+   *
+   * Since this is sometimes not useful, settings govern the actual logging.
+   * (E.g. when processing a full dataset that we know has duplicate e-mail
+   * addresses, logging would add nothing.) As this is a private method, we can
+   * still change it to take e.g. the action codes into account.
+   */
+  protected function logCanceledUpdate(LeadWithSourceId $kept_lead, LeadWithSourceId $skipped_lead, $descn) {
+    if (!empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate()) {
+      $this->logAndStore("Source system contains duplicate records $descn: @c1 and @c2. One of them should have Sharpspring synchronization disabled. We are skipping the latter.",
+        array('@c1' => $this->getLeadDescription($kept_lead), '@c2' => $this->getLeadDescription($skipped_lead)), WATCHDOG_WARNING);
+    }
+  }
+
+  protected function logAndStore($message, array $variables = array(), $severity = WATCHDOG_NOTICE) {
+    $this->log($message, $variables, $severity);
+    // Store this until we send the e-mail. We don't make a difference between
+    // errors and warnings. (Maybe we should. Maybe not.)
+    $this->temporaryLogs[] = t($message, $variables);
+  }
+
+  /**
+   * Signifies whether we are processing a time-incremental data set.
+   */
+  protected function processingIncrementalFromDate() {
+    return empty($this->settings['fetcher_timestamp_ignore']) && empty($this->settings['cache_items']);
+    // The proper logic is below here, but since our opt_fetcher_timestamp
+    // setting is always on, this comes down to the above easy one-liner.
+    // (Which also matches the comments in our UI form. Checking just
+    // fetcher_timestamp_ignore is not enough because of the hack in start().)
+//    static $uses_timestamp;
+//    if (!isset($uses_timestamp)) {
+//      $uses_timestamp = $this->callFetcherMethod('getStartTimestamp', FALSE);
+//    }
+//    return $uses_timestamp;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function processItem($item, array &$context) {
+    // An item is supposed to be an array of leads that all need to be either
+    // created or updated. Doublecheck the format to protect against inadvertent
+    // code changes / bugs. One property always exists for us: 'active'. (Not
+    // id.)
+    /** @var LeadWithSourceId[] $item */
+    if (!isset($item[0]->active)) {
+      // t() in exceptions? meh.
+      throw new RuntimeException(t('Invalid format for queued item to process: @item', array('@item' => json_encode($item))));
+    }
+    $create_new = empty($item[0]->id);
+    foreach ($item as $lead) {
+      if (empty($lead->id) != $create_new) {
+        // We could split them and send create/update statements separately
+        // instead of throwing an exception, but we shouldn't have to do that.
+        throw new RuntimeException(t("Invalid format for queued item to process; it has 'create' and 'update' leads mixed up: @item", array('@item' => json_encode($item))));
+      }
+    }
+
+    // Create/update data in Sharpspring.
+    $method = $create_new ? 'createLeads' : 'updateLeads';
+    try {
+      $result = $this->getSharpSpring($context)->$method($item);
+      // It sucks, but we can't trust our updates; they may have failed (but
+      // returned a success code) if the e-mail address changed and there's
+      // another record with the same e-mail address in the db. So we need to
+      // doublecheck that the lead is actually in Sharpspring... but we'll do
+      // that at the end, getting all updated items with one query.
+
+      // Do accounting of successful updated/created items.
+      foreach ($item as $i => $lead) {
+        // We record the source IDs for the items sent, just like elsewhere. But
+        // in 'sent', we'll try to key them by Sharpspring ID; who knows the
+        // record will be useful somehow. For updates, we already had the
+        // Sharpspring ID; for creates, we just got it returned.
+        $ss_id = !empty($lead->id) ? $lead->id : (!empty($result[$i]['id']) ? $result[$i]['id'] : '');
+        $src_id = !empty($lead->sourceId) ? $lead->sourceId : $ss_id;
+        if (empty($ss_id)) {
+          // This should never happen.
+          $context['sent'][] = $src_id;
+        }
+        else {
+          $context['sent'][$ss_id] = $src_id;
+        }
+      }
+    }
+    catch (SharpSpringRestApiException $e) {
+      if ($e->isObjectLevel()) {
+        // At least one object-level error was encountered but some leads may
+        // have been updated successfully. (Since we have called XXXateLeads,
+        // not XXXateLead, this exception is always a 'wrapper' around the
+        // actual object errors.) Do logging/accounting for each.
+        foreach ($e->getData() as $i => $object_result) {
+          // Derive Sharpspring ID and source ID like above.
+          // @todo again, check if object_result has correct structure.
+          $ss_id = !empty($item[$i]->id) ? $item[$i]->id : (!empty($object_result['id']) ? $object_result['id'] : '');
+          $src_id = !empty($item[$i]->sourceId) ? $item[$i]->sourceId: $ss_id;
+          try {
+            $this->getSharpSpring()->validateObjectResult($object_result);
+            // Creates don't have an ID; updates do.
+            if (empty($item[$i]->id)) {
+              // We're hoping this will just get a 'low' number, so we won't
+              // get confused with Sharpspring IDs. It won't be a huge deal tho.
+              $context['sent'][] = $src_id;
+            }
+            else {
+              $context['sent'][$ss_id] = $src_id;
+            }
+          }
+          catch (Exception $e) {
+            $context['error'][] = $src_id;
+            // $e is most likely a SharpSpringRestApiException. This logs all
+            // error data from the object/response, which is inside the exception.
+            $this->log('Sharpspring REST API call @method on source id @id encountered: @e', array('@method' => $method, '@id' => $src_id, '@e' => (string) $e), WATCHDOG_ERROR);
+          }
+        }
+      }
+      else {
+        // API-level error. Assume none of the leads have been created.
+        foreach ($item as $lead) {
+          $context['error'][] = $lead->sourceId;
+        }
+        // Casting to string yields a description of the whole exception,
+        // including type & data (good; we need it) and backtrace (unnecessary).
+        $this->log('Sharpspring REST API call @method threw: @e', array('@method' => $method, '@e' => (string) $e), WATCHDOG_ERROR);
+      }
+    }
+    catch (Exception $e) {
+      // Same as the API-level error above.
+      foreach ($item as $lead) {
+        $context['error'][] = $lead->sourceId;
+      }
+      $this->log('Sharpspring REST API call @method threw: @e', array('@method' => $method, '@e' => (string) $e), WATCHDOG_ERROR);
+    }
+
+    if (static::LEADS_UPDATE_WAIT) {
+      sleep(static::LEADS_UPDATE_WAIT);
+    }
+
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function finish(array &$context) {
+    $this->temporaryLogs = array();
+
+    // As mentioned in processItems(), we unfortunately can't be sure that
+    // updates which returned success, actually succeeded. So retrieve updates
+    // made since we started, and check whether all updates that we *think*
+    // succeeded, are among them.
+    $sent_ss_ids = $context['sent'];
+    if ($sent_ss_ids) {
+      if (empty($context['ict_start_updates']) || !is_int($context['ict_start_updates'])) {
+        $this->log('Start timestamp was lost! Now we cannot doublecheck whether all updates actually succeeded.', array(), WATCHDOG_ERROR);
+      }
+      else {
+        // This call bypasses the local leads cache.
+        $since = gmdate('Y-m-d H:i:s', $context['ict_start_updates']);
+        $leads = $this->getSharpSpring($context)->getLeadsDateRange($since,  gmdate('Y-m-d H:i:s'), 'update', 5000);
+        // Subtract all leads we get back here, from all 'sent' leads. Doing it
+        // by Sharpspring ID rather than source ID seems a bit more precise,
+        // since we're only interested in updates (for which we have them).
+        foreach ($leads as $lead) {
+          unset($sent_ss_ids[$lead['id']]);
+        }
+        // Any keys now left in $sent_ss_ids have apparently not been updated.
+        // (They could be creates rather than updates, but that should not
+        // matter - we should also have gotten those back so we're hoping at
+        // least all creates were removed from $sent_ss_ids by now. If there are
+        // any 'small' numbers among the keys, we should recheck our code
+        // because at least in the 'sent' case we expect to have only valid
+        // Sharpspring IDs.
+        if ($sent_ss_ids) {
+          // Create a list of source + sharpspring IDs.
+          $ids = array();
+          foreach ($sent_ss_ids as $ss_id => $src_id) {
+            $ids[] = "$src_id/$ss_id";
+          }
+          $this->logAndStore('@count out of @total updates that were apparently sent to Sharpspring, are still not found / updated in Sharpspring; this should be investigated! List of source / Sharpspring IDs: @list',
+            array('@count' => count($ids), '@total' => count($context['sent']), '@list' => implode(',', $ids)), WATCHDOG_ERROR);
+          // @todo if we really wanted, then rather than giving up we could
+          //   redo the whole process. If e-mails / source IDs were changed,
+          //   the checks in start() may have a slightly different outcome - and
+          //   updates which are already done will get compared 'successfully'
+          //   and not re-done. If we get back here and the amount of errors
+          //   is not lower, we can continue and do the error summary.
+        }
+      }
+    }
+
+    // Run the parent/fetcher finish(). This will save the fetcher_timestamp.
+    parent::finish($context);
+
+    // Not sure yet whether we want to make this configurable in other ways.
+    // For now, include some lists of IDs only for incremental runs.
+    $include_ids_sent = $include_ids_not_sent = $this->processingIncrementalFromDate();
+
+    $message = format_plural(count($context['sent']), '1 contact sent to Sharpspring', '@count contacts sent to Sharpspring');
+    if (count($context['sent'])) {
+      $log_message = 'Synced to Sharpspring: @count' . ($include_ids_sent ? ' (@items)' : '');
+      // Always include the @items parameter. If inquisitive people want to
+      // search the log backend, they can.
+      $this->log($log_message, array('@count' => count($context['sent']), '@items' => implode(', ', $context['sent'])), WATCHDOG_DEBUG);
+    }
+    if ($context['remove']) {
+      $message .= ', ' . count($context['remove']) . ' of which were deactivated because apparently removed from the source system';
+      $log_message = 'Deactivated because apparently removed from the source system: @count (@items). (These items are also logged as "synced", unless they are logged as "error encountered".)';
+      $this->log($log_message, array('@count' => count($context['remove']), '@items' => implode(', ', $context['remove'])), WATCHDOG_DEBUG);
+    }
+    if ($context['skipped']) {
+      $message .= '; ' . count($context['skipped']) . ' not sent because errors / update clashes seen beforehand';
+      $this->log('Not sent to Sharpspring because errors / update clashes seen beforehand: @count (@items). Details may have been logged earlier (dependent on job settings).', array('@count' => count($context['skipped']), '@items' => implode(', ', $context['skipped'])), WATCHDOG_ERROR);
+    }
+    if ($context['error']) {
+      $message .= '; ' . format_plural(count($context['error']), '1 error encountered during sending', '@count errors encountered during sending');
+      $this->logAndStore('Summary of earlier detailed logs: errors encountered during sending: @count (@items).', array('@count' => count($context['error']), '@items' => implode(', ', $context['error'])), WATCHDOG_ERROR);
+    }
+    if ($context['drunkins_exception_count']) {
+      $message .= '; ' . format_plural($context['drunkins_exception_count'], '1 exceptions thrown during sending', '@count exceptions thrown during sending');
+      $this->logAndStore('Summary of earlier detailed logs: exceptions thrown during sending: @count.', array('@count' => count($context['drunkins_exception_count'])), WATCHDOG_ERROR);
+    }
+    if ($context['equal']) {
+      $message .= '; ' . count($context['equal']) . ' not sent because seemingly equal';
+      $log_message = 'Not sent to Sharpspring because seemingly equal: @count' . ($include_ids_not_sent ? ' (@items)' : '');
+      $this->log($log_message, array('@count' => count($context['equal']), '@items' => implode(', ', $context['equal'])), WATCHDOG_DEBUG);
+    }
+    if ($context['inactive']) {
+      $message .= '; ' . count($context['inactive']) . ' not sent because inactive';
+      $log_message = 'Not sent to Sharpspring because inactive: @count' . ($include_ids_not_sent ? ' (@items)' : '');
+      $this->log($log_message, array('@count' => count($context['inactive']), '@items' => implode(', ', $context['inactive'])), WATCHDOG_DEBUG);
+    }
+    if ($context['dupes_ignored']) {
+      $message .= '; ' . count($context['dupes_ignored']) . ' duplicate (inactive) contacts ignored';
+      $this->log('Inactive duplicates of other contacts, ignored: @count.', array('@count' => count($context['dupes_ignored']), '@items' => implode(', ', $context['dupes_ignored'])), WATCHDOG_DEBUG);
+    }
+    if ($this->temporaryLogs) {
+      drupal_mail('ict_comm', 'sync_errors', variable_get("ict_comm_afas_comm_error_mail", 'roderik@yellowgrape.nl'), language_default(), array('logs' => $this->temporaryLogs));
+    }
+
+    return $message . '.';
+  }
+
+  /**
+   * Returns the key-value store implementation used for our leads cache.
+   */
+  protected function getKeyValueStore() {
+    if (!isset($this->keyValueStore)) {
+      $this->keyValueStore = new Drupal7SqlStorage('ict_comm_sharpspring_leads');
+    }
+
+    return $this->keyValueStore;
+  }
+
+  /**
+   * Returns Connection (or cache) configured to create leads in our account.
+   *
+   * Note this may not actually return a Connection object; it may be a
+   * LocalLeadCache object which has the same CRUD methods defined.
+   *
+   * @param array $context
+   *   If this has a 'ss_leads_cache' set inside, return that (and assume it's
+   *   ready for use).
+   *
+   * @return \SharpSpring\RestApi\Connection;
+   */
+  protected function getSharpSpring($context = array()) {
+    if (isset($context['ss_leads_cache'])) {
+      return $context['ss_leads_cache'];
+    }
+
+    if (!isset($this->sharpSpringConnection)) {
+      $client = new CurlClient([
+        'account_id' => $this->settings['sharpspring_api_account_id'],
+        'secret_key' => $this->settings['sharpspring_api_secret_key']
+      ]);
+      $this->sharpSpringConnection = new Connection($client);
+      if (!empty($this->settings['sharpspring_lead_custom_properties'])) {
+        $this->sharpSpringConnection->setCustomProperties('lead', $this->settings['sharpspring_lead_custom_properties']);
+      }
+    }
+
+    return $this->sharpSpringConnection;
+  }
+
+  /**
+   * Create Sharpspring lead from an array of source data.
+   *
+   * A subclass should override this method, based on the source items received
+   * through the configured fetcher class. The below will only return NULL so
+   * the sync will not do anything.
+   *
+   * This is meant to be run from start(), not processItem(), so it can get
+   * compared to existing lead data and equal / invalid items items don't get
+   * queued for updating/creating.
+   *
+   * @param array $source_item
+   *   Contact data as returned from our source system/fetcher.
+   *
+   * @return LeadWithSourceId|null
+   *   Sharpspring data, or NULL for data error (in which case we've logged).
+   */
+  protected function convertToLead(array $source_item) {
+    $lead = new LeadWithSourceId();
+    $lead->sourceId = $source_item['id'];
+    $lead->emailAddress = $source_item['mail'];
+    $lead->active = 0;
+    $lead->firstName = '';
+    $lead->lastName = '';
+    return NULL;
+  }
+
+  /**
+   * Returns a human readable 'unique enough' description for this lead.
+   *
+   * @param LeadWithSourceId $lead
+   *
+   * @return string
+   */
+  public function getLeadDescription(LeadWithSourceId $lead) {
+    $name = !empty($lead->firstName) ? $lead->firstName . ' ' : '';
+    // : ( !empty($item['initials']) ? $item['initials'] . ' ' : '');
+    //$name .= !empty($item['infix']) ? $item['infix'] . ' ' : '';
+    $name .= !empty($lead->lastName) ? $lead->lastName . ' ' : '';
+    if (!$name) {
+      // This is never true
+      $name = '? ';
+    }
+    if (!empty($lead->companyName)) {
+      // This is always true
+      $name .= '/ ' . $lead->companyName . ' ';
+    }
+    // We want the e-mail address to be part of it because it's going to be used
+    // for comparisons between leads - the e-mail is important to see what's
+    // exactly going on.
+    if (!empty($lead->emailAddress)) {
+      // This is always true
+      $name .= '(' . $lead->emailAddress . ')';
+    }
+    return rtrim($name);
+  }
+
+}
