@@ -303,6 +303,13 @@ class SharpSpringSyncJob extends DrunkinsJob {
       '#default_value' => TRUE,
       '#weight' => 2,
     );
+    $form['logging_display']['display_changed_values'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Display existing values along with the new values for changed fields.'),
+      '#description' => t('This does nothing with the "Start batch" action.'),
+      '#default_value' => TRUE,
+      '#weight' => 5,
+    );
     return $form;
   }
 
@@ -713,12 +720,35 @@ class SharpSpringSyncJob extends DrunkinsJob {
       }
 
       // Now queue the lead up. Also if it's an error / clash, because we want
-      // to log all extra clashes with it explicitly. (These clashes won't
-      // cause different behavior but the user will at least see them.)
+      // to log all extra clashes with it explicitly. (These clashes won't cause
+      // different behavior but the user will at least see them.)
       if (!$lead_action_code) {
         throw new RuntimeException("Internal error (code should be changed): could not determine what to do with contact {$this->getLeadDescription($lead)}.");
       }
       else {
+        if (!empty($this->settings['list_format']) && !empty($this->settings['display_changed_values']) && count($compare) > 1) {
+          // Add the 'changed' old values into the lead. We'll need to convert
+          // fieldnames to properties.
+          // @todo this is not fully done yet - at the moment we add HTML tags
+          //    but do not escape values, and print the full value (with HTML)
+          //    escaped in the list. (Which obviously is weird - but at least we
+          //    can derive what changed.) This needs custom display code.
+          foreach ($compare as $field => $value) {
+            if ($field !== 'id') {
+              // array_search is slow but it seems better than creating another
+              // lookup index just for the (non- time critical) display case.
+              $property = array_search($field, $this->settings['sharpspring_lead_custom_properties']);
+              if ($property === FALSE) {
+                $property = $field;
+              }
+              if (!isset($value) || $value === '') {
+                $value = '-';
+              }
+              $lead->$property = "<del>$value</del><br>" . $lead->$property;
+            }
+          }
+        }
+
         $preprocessed_items[$lead_key] = array($lead, $compare ? $compare['id'] : 0, $lead_action_code);
         // Update the 'seen' caches. (We know that if we are >3, any existing
         // lead referenced in there currently will have been set to 1 or 2.)
@@ -755,6 +785,7 @@ class SharpSpringSyncJob extends DrunkinsJob {
           ) {
             // This should be deactivated, and accounted for separately.
             $context['remove'][] = $lead_array[$field_source_id];
+            $lead_array['active'] = 0;
             // It's strange to convert this lead into an object but that way we
             // can keep the below code the same (in the 'display' as well as
             // 'process' case).
@@ -773,10 +804,6 @@ class SharpSpringSyncJob extends DrunkinsJob {
     // processing. Make separate groups for creates and updates.
     $items = array();
     if (!empty($this->settings['list_format'])) {
-      // @todo not in this class, but an idea for a runner/UI: it would be
-      // awesome to have a custom list function that can print the changed
-      // values in bold, because we already know what values were changed (if
-      // code 5/6/7 at least).
       $include_noops = !empty($this->settings['log_include_noops']) || $this->processingIncrementalFromDate();
       $include_clashes = !empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate();
       foreach ($preprocessed_items as $item) {
@@ -943,7 +970,6 @@ class SharpSpringSyncJob extends DrunkinsJob {
         // actual object errors.) Do logging/accounting for each.
         foreach ($e->getData() as $i => $object_result) {
           // Derive Sharpspring ID and source ID like above.
-          // @todo again, check if object_result has correct structure.
           $ss_id = !empty($item[$i]->id) ? $item[$i]->id : (!empty($object_result['id']) ? $object_result['id'] : '');
           $src_id = !empty($item[$i]->sourceId) ? $item[$i]->sourceId: $ss_id;
           try {
@@ -958,10 +984,40 @@ class SharpSpringSyncJob extends DrunkinsJob {
               $context['sent'][$ss_id] = $src_id;
             }
           }
-          catch (Exception $e) {
+          catch (SharpSpringRestApiException $e) {
+            $compare = FALSE;
+            if (in_array($e->getCode(), array(301, 302))) {
+              // We got a "entry already exists" or "no table rows affected"
+              // error. (We assume upon create or update, respectively.)
+              $compare = $this->recheckEqualLead($item[$i], $context);
+            }
+            if (is_array($compare) && count($compare) == 1) {
+              // Upon a re-check, our lead appears equal to Sharpspring. This
+              // seems to be caused by our cache being out of date, then. Warn.
+              $this->log('Sharpspring REST API call @method on source id @id encountered error @c: @e:. On further checking, the lead in Sharpspring is already equal. This indicates that our local leads cache is probably outdated.', array('@method' => $method, '@id' => $src_id, '@c' => $e->getCode(), '@e' => $e->getMessage()), WATCHDOG_WARNING);
+            }
+            elseif ($compare === [] && empty($item[$i]->active)) {
+              // Upon a re-check, our lead appears to be removed from
+              // Sharpspring. (For an lead update with active=0, this apparently
+              // yields a 302 "no table rows affected".) Since we wanted to
+              // deactivate it, that is not a huge deal but our cache is out of
+              // date, just like above here.
+              $this->log('Sharpspring REST API call @method on source id @id encountered error @c: @e. On further checking, the lead does not exit anymore in Sharpspring. This indicates that our local leads cache is probably outdated.', array('@method' => $method, '@id' => $src_id, '@c' => $e->getCode(), '@e' => $e->getMessage()), WATCHDOG_WARNING);
+            }
+            else {
+              // Log anything else as error.
+              $this->log('Sharpspring REST API call @method on source id @id encountered: @e', array('@method' => $method, '@id' => $src_id, '@e' => (string) $e), WATCHDOG_ERROR);
+            }
+            // We don't want to create a new category for the edge cases that
+            // we logged as a warning, so just add it to 'error'. ('sent' is not
+            // good for things that are not actually updated, as long as we
+            // doublecheck the contents of 'sent' in finish().)
             $context['error'][] = $src_id;
-            // $e is most likely a SharpSpringRestApiException. This logs all
-            // error data from the object/response, which is inside the exception.
+          }
+          catch (Exception $e) {
+            // A non-SharpSpringRestApiException is extremely unlikely, but we
+            // treat it the same.
+            $context['error'][] = $src_id;
             $this->log('Sharpspring REST API call @method on source id @id encountered: @e', array('@method' => $method, '@id' => $src_id, '@e' => (string) $e), WATCHDOG_ERROR);
           }
         }
@@ -987,7 +1043,48 @@ class SharpSpringSyncJob extends DrunkinsJob {
     if (static::LEADS_UPDATE_WAIT) {
       sleep(static::LEADS_UPDATE_WAIT);
     }
+  }
 
+  /**
+   * Check if a lead is already updated in Sharpspring.
+   *
+   * In practice this is a 'recheck' of a lead which we thought was updatable;
+   * we now actually check Sharpspring instead of our local cache, and make sure
+   * that our cache is updated too.
+   *
+   * @param LeadWithSourceId $lead
+   *   A lead object.
+   * @param array $context
+   *   The job context.
+   *
+   * @return array|false
+   *   False if we could not perform the equality check. Otherwise the same
+   *   returnvalue as LocalLeadCache::compareLead(), that is: empty array means
+   *   the lead was not found, 1 array value means the lead is equal and a
+   *   larger array means it differs.
+   */
+  protected function recheckEqualLead(LeadWithSourceId $lead, array $context) {
+    if (!isset($context['ss_leads_cache'])) {
+      return FALSE;
+    }
+
+    /** @var \SharpSpring\RestApi\LocalLeadCache $cache */
+    $cache = $context['ss_leads_cache'];
+    if (empty($lead->id)) {
+      // Assume emailAddress exists if id does not; otherwise we would never get
+      // here.
+      $compare = $cache->getLeads(['emailAddress' => $lead->emailAddress]);
+    }
+    else {
+      $compare = $cache->getLeadRemote($lead->id);
+    }
+
+    // If we didn't get anything returned here, we don't need to call
+    // compareLead() because that would return the same (empty array).
+    if ($compare) {
+      $compare = $cache->compareLead($lead, FALSE);
+    }
+    return $compare;
   }
 
   /**
