@@ -2,6 +2,8 @@
 
 namespace SharpSpring\RestApi;
 
+use InvalidArgumentException;
+use UnexpectedValueException;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -165,6 +167,9 @@ class LocalLeadCache {
    *   get the Sharpspring ID, by default.)
    * @param \Psr\Log\LoggerInterface $logger
    *   (optional) A logger.
+   *
+   * @throws \UnexpectedValueException
+   *   If the key-value store somehow got corrupted and leads are not arrays.
    */
   public function __construct(Connection $connection, $key_value_store, $refresh_cache_since, $foreign_key = NULL, array $cached_properties = [], LoggerInterface $logger = NULL) {
     // @todo generalize foreignKey so we can have more than one reverse-lookup
@@ -185,7 +190,10 @@ class LocalLeadCache {
       $offset = 0;
       do {
         $leads = $this->keyValueStore->getAllBatched(1024, $offset);
-        foreach ($leads as $lead_array) {
+        foreach ($leads as $sharpspring_id => $lead_array) {
+          if (!is_array($lead_array)) {
+            throw new UnexpectedValueException("Lead value $sharpspring_id in key-value store is not an array: " . json_encode($lead_array));
+          }
           $this->updateMemoryCaches($lead_array);
         }
         $offset = count($leads) == 1024 ? $offset + 1024 : 0;
@@ -236,9 +244,12 @@ class LocalLeadCache {
    *   - an array with more values means the input lead differs. (Careful with
    *     using isset(), because a value is NULL if the existing lead's value is
    *     not set.)
-   *   It is possible this method returns an empty array when there is a lead in
-   *   Sharpspring with the same data... if the input lead has no ID and the
-   *   lead in Sharpspring is inactive.
+   *   Other notes:
+   *   - For custom fields, the keys are always the actual field value in
+   *     Sharpspring, not the name of the custom property in a lead object.
+   *   - It is possible this method returns an empty array when there is a lead
+   *     in Sharpspring with the same data... if the input lead has no ID and
+   *     the lead in Sharpspring is inactive.
    *
    * @throws \InvalidArgumentException
    *   If no IDs/email properties are set in the lead object.
@@ -252,7 +263,10 @@ class LocalLeadCache {
     // is empty, on e-mail address.
     $leads = [];
     if (!empty($external_lead['id'])) {
-      $leads = [$this->getLead($external_lead['id'], $check_remotely)];
+      $lead = $this->getLead($external_lead['id'], $check_remotely);
+      if ($lead) {
+        $leads = [$lead];
+      }
     }
     else {
       if (!empty($this->foreignKey) && !empty($external_lead[$this->foreignKey])) {
@@ -262,7 +276,7 @@ class LocalLeadCache {
         $leads = $this->getLeadsByEmail($external_lead['emailAddress'], $check_remotely);
       }
       elseif (empty($this->foreignKey) || empty($external_lead[$this->foreignKey])) {
-        throw new \InvalidArgumentException('The provided Lead object has no ID / e-mail values.');
+        throw new InvalidArgumentException('The provided Lead object has no ID / e-mail values.');
       }
     }
 
@@ -285,7 +299,9 @@ class LocalLeadCache {
       // because we want to see differences between '' and 0.
       $diff = ['id' => $sharpspring_lead['id']];
       foreach ($external_lead as $key => $value) {
-        if (isset($value) != isset($sharpspring_lead[$key]) || (string) $sharpspring_lead[$key] !== (string) $value) {
+        $external_value_set = isset($value) && $value !== '';
+        $sharpspring_value_set = isset($sharpspring_lead[$key]) && $sharpspring_lead[$key] !== '';
+        if ($sharpspring_value_set !== $external_value_set || (string) $sharpspring_lead[$key] !== (string) $value) {
           $diff[$key] = isset($sharpspring_lead[$key]) ? $sharpspring_lead[$key] : NULL;
         }
       }
@@ -435,9 +451,15 @@ class LocalLeadCache {
    *
    * @return array
    *   A lead structure; empty array means this ID does not exist.
+   *
+   * @throws \UnexpectedValueException
+   *   If the key-value store somehow got corrupted and leads are not arrays.
    */
   public function getLead($sharpspring_id, $check_remotely = TRUE) {
     $lead = $this->keyValueStore->get($sharpspring_id, []);
+    if (!is_array($lead)) {
+      throw new UnexpectedValueException("Lead value $sharpspring_id in key-value store is not an array: " . json_encode($lead));
+    }
 
     if (!$lead && $check_remotely) {
       $lead = $this->getLeadRemote($sharpspring_id);
@@ -917,7 +939,9 @@ class LocalLeadCache {
       if (!isset($where['emailAddress'])) {
         $email = $this->getPropertyValue('emailAddress', $id, FALSE);
         if ($email) {
-          $this->sharpspringIdsByEmail[$email] = [];
+          // This should really be a one-element array but we still filter like
+          // it might not be. This code dovetails with updateMemoryCaches().
+          $this->sharpspringIdsByEmail[$email] = array_filter($this->sharpspringIdsByEmail[$email], function ($v) use ($id) { return $v !== $id;});
         }
       }
 
@@ -925,7 +949,7 @@ class LocalLeadCache {
       if (!empty($this->foreignKey)) {
         $fkey_id = $this->getPropertyValue($this->foreignKey, $id, FALSE);
         if ($fkey_id) {
-          $this->sharpspringIdsByForeignKey[$fkey_id] = [];
+          $this->sharpspringIdsByForeignKey[$fkey_id] = array_filter($this->sharpspringIdsByForeignKey[$fkey_id], function ($v) use ($id) { return $v !== $id;});
         }
       }
 
