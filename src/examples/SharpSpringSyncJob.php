@@ -222,15 +222,7 @@ class SharpSpringSyncJob extends DrunkinsJob {
 
     // Extra selectors to make explicit the fact that we also get items from
     // Sharpspring.
-
-    $last_update = variable_get($this->settings['job_id'] . '_ts_kvupdate', 0);
-    $last_update_str = '';
-    if ($last_update) {
-      // Overlap is number of seconds to go back from last recorded timestamp.
-      // Note different format, and different timezone (UTC) than the regular
-      // timestamp.
-      $last_update_str = gmdate('Y-m-d H:i:s', $last_update - static::KEYVALUE_UPDATE_OVERLAP);
-    }
+    $last_update = $this->getLastLeadCacheUpdateTimeString(TRUE);
     $form['selection']['leads'] = array(
       '#type' => 'fieldset',
       '#title' => t('Local leads cache'),
@@ -240,9 +232,9 @@ class SharpSpringSyncJob extends DrunkinsJob {
     $form['selection']['leads']['ss_leads_timestamp_from_date'] = array(
       '#type' => 'textfield',
       '#title' => t('Refresh leads cache with items changed in Sharpspring since'),
-      '#description' => 'Enter "-" to skip refreshing the leads cache altogether. Date format is Y-m-d H:i:s only! The time is expressed in UTC. (This is different than above; this literal value is used as an argument to a Sharpapring API call.)',
+      '#description' => 'Format: anything which PHP can parse. "-" to skip refreshing the leads cache altogether.',
       '#required' => TRUE,
-      '#default_value' => $last_update_str,
+      '#default_value' => $last_update,
       '#weight' => 1,
       '#states' => array('enabled' => array(
         ':input[name="ss_leads_timestamp_ignore"]' => array('checked' => FALSE),
@@ -257,14 +249,14 @@ class SharpSpringSyncJob extends DrunkinsJob {
     $form['selection']['leads']['ss_leads_timestamp_ignore'] = array(
       '#type' => 'checkbox',
       '#title' => t('Ignore "items changed in Sharpspring since"; refresh full cache.'),
-      '#default_value' => empty($last_update),
+      '#default_value' => (!$last_update || $last_update === '-'),
       '#weight' => 2,
 //      '#states' => array('enabled' => array(':input[name="cache_items"]' => array('!value' => '2'))),
     );
-    if (!empty($last_update)) {
-      // Check if we should do a full refresh.
+    if ($last_update && $last_update !== '-') {
+      // Check if we should do a full refresh. $last_update is a real time but
       $calculator = new DrunkinsCronTab(static::KEYVALUE_REFRESH_SCHEDULE);
-      $next = $calculator->nextTime($last_update);
+      $next = $calculator->nextTime(strtotime($last_update));
       if ($next <= time()) {
         $form['selection']['ss_leads_timestamp_ignore']['#description'] = "<em>According to the schedule, it's time for a new update!</em>";
         $form['selection']['ss_leads_timestamp_ignore']['#default_value'] = TRUE;
@@ -389,34 +381,7 @@ class SharpSpringSyncJob extends DrunkinsJob {
     }
     
     // Initialize cache for Leads.
-    if (!empty($this->settings['ss_leads_timestamp_ignore'])) {
-      $refresh_since = '';
-    }
-    elseif (!empty($this->settings['ss_leads_timestamp_from_date'])) {
-      $refresh_since = $this->settings['ss_leads_timestamp_from_date'];
-      if ($refresh_since === '--') {
-        // This is too dangerous (and could be a typo when '-' was meant);
-        throw new \RuntimeException("'ss_leads_timestamp_from_date' setting cannot be '--'.");
-      }
-    }
-    else {
-      // For the variable names we assume that the job IDs include the module
-      // name and will therefore be namespaced alreaady.
-      $last_update = variable_get($this->settings['job_id'] . '_ts_kvupdate', 0);
-      $refresh_since = '';
-      if ($last_update) {
-        $refresh_since = gmdate('Y-m-d H:i:s', $last_update - static::KEYVALUE_UPDATE_OVERLAP);
-        // Check the cron schedule to see if a full refresh is due.
-        // @todo We should refresh from cron too, not only UI. But how? Isn't this too expensive?
-        if ($this->isStartedFromUI()) {
-          $calculator = new DrunkinsCronTab(static::KEYVALUE_REFRESH_SCHEDULE);
-          $next = $calculator->nextTime($last_update);
-          if ($next <= time()) {
-            $refresh_since = '';
-          }
-        }
-      }
-    }
+    $refresh_since = $this->getLastLeadCacheUpdateTimeString();
     // Get new timestamp before we start fetching data from Sharpspring.
     $new_timestamp = time();
     $leads_cache = new LocalLeadCache(
@@ -438,8 +403,11 @@ class SharpSpringSyncJob extends DrunkinsJob {
     // @todo and this doesn't make much sense unless we also implement this kind
     //   of 'paging' for the source system.
     if ($refresh_since !== '-' && $refresh_since !== '--') {
-      variable_set($this->settings['job_id'] . '_ts_kvupdate', $new_timestamp);
+      $this->setLastLeadCacheUpdateTime($new_timestamp);
     }
+    // Set start timestamp which we'll use in finish(). (We set our own so it
+    // is independent of opt_fetcher_timestamp setting.)
+    $context['sharpspring_start_updates'] = time();
 
     // Preprocess the deduped items. We'll go through all items and check if any
     // of the updates 'clash'. The reason for this are possible edge cases that
@@ -865,10 +833,6 @@ class SharpSpringSyncJob extends DrunkinsJob {
           && !$this->isStartedFromUI()) {
         drupal_mail('ict_comm', 'sync_skipped', variable_get("ict_comm_afas_comm_error_mail", 'roderik@yellowgrape.nl'), language_default(), array('nr_warnings' => count($context['skipped']), 'logs' => $this->temporaryLogs));
       }
-
-      // Set start timestamp which we'll use in finish(). (We set our own so it
-      // is independent of opt_fetcher_timestamp setting.)
-      $context['ict_start_updates'] = time();
     }
 
     return $items;
@@ -1099,13 +1063,21 @@ class SharpSpringSyncJob extends DrunkinsJob {
     // succeeded, are among them.
     $sent_ss_ids = $context['sent'];
     if ($sent_ss_ids) {
-      if (empty($context['ict_start_updates']) || !is_int($context['ict_start_updates'])) {
+      if (empty($context['sharpspring_start_updates']) || !is_int($context['sharpspring_start_updates'])) {
         $this->log('Start timestamp was lost! Now we cannot doublecheck whether all updates actually succeeded.', array(), WATCHDOG_ERROR);
       }
       else {
-        // This call bypasses the local leads cache.
-        $since = gmdate('Y-m-d H:i:s', $context['ict_start_updates']);
-        $leads = $this->getSharpSpring($context)->getLeadsDateRange($since,  gmdate('Y-m-d H:i:s'), 'update', 5000);
+        $ignore_cache = $this->getLastLeadCacheUpdateTime() == -1;
+        $sharpspring = $this->getSharpSpring($ignore_cache ?  array() : $context);
+        $new_timestamp = time();
+        // Get leads updated since updates were started.
+        $since = gmdate('Y-m-d H:i:s', $context['sharpspring_start_updates'] - static::KEYVALUE_UPDATE_OVERLAP);
+        $leads = $sharpspring->getLeadsDateRange($since,  gmdate('Y-m-d H:i:s'), 'update', 5000);
+        // If our local cache was updated too, then increment the timestamp so
+        // that we don't need to get these leads next time.
+        if ($sharpspring instanceof LocalLeadCache) {
+          $this->setLastLeadCacheUpdateTime($new_timestamp);
+        }
         // Subtract all leads we get back here, from all 'sent' leads. Doing it
         // by Sharpspring ID rather than source ID seems a bit more precise,
         // since we're only interested in updates (for which we have them).
@@ -1187,6 +1159,117 @@ class SharpSpringSyncJob extends DrunkinsJob {
     }
 
     return $message . '.';
+  }
+
+  /**
+   * Gets the time to refresh our local leads cache, as a string expression.
+   *
+   * @param bool $for_display
+   *   (optional) if TRUE, changes the rules of deriving a bit and return in
+   *   local time. If FALSE / not provided: return in UTC in a format that the
+   *   LocalLeadConstructor class can take.
+   *
+   * @return string
+   *   If $for_display is false: a time (in UTC), '' (for full refresh) or '-'
+   *   (for no refresh). If $for_display is true / not provided: same but in
+   *   local time and subject to different rules of deriving.
+   *
+   * @throws \RuntimeException
+   *   If settings are invalid and $for_display is false.
+   */
+  protected function getLastLeadCacheUpdateTimeString($for_display = FALSE) {
+    $timestamp = $this->getLastLeadCacheUpdateTime($for_display);
+    if ($timestamp) {
+      if ($timestamp === -1) {
+        $date = '-';
+      }
+      elseif ($for_display) {
+        $date = date('Y-m-d\TH:i:s', $timestamp);
+      }
+      else {
+        $date = gmdate('Y-m-d H:i:s', $timestamp);
+      }
+    }
+    else {
+      $date = '';
+    }
+
+    return $date;
+  }
+
+  /**
+   * Derives the time from which our local leads cache should be refreshed.
+   *
+   * @param bool $for_display
+   *   (optional) if TRUE, changes the rules of deriving a bit: no exceptions
+   *   are thrown and the 'ignore' setting / cron check is ignored (since that
+   *   is displayed separately).
+   *
+   * @return int
+   *   The timestamp of latest update, possibly influenced by an 'overlap'
+   *   constant and by settings which are usually set from the UI only. 0 if the
+   *   cache should be considered fully outdated. -1 to completely ignore the
+   *   time, and take the cache as it is now.
+   *
+   * @throws \RuntimeException
+   *   If settings are invalid and $for_display is false.
+   */
+  protected function getLastLeadCacheUpdateTime($for_display = FALSE) {
+    if (!$for_display && !empty($this->settings['ss_leads_timestamp_ignore'])) {
+      $timestamp = 0;
+    }
+    elseif (!empty($this->settings['ss_leads_timestamp_from_date'])) {
+      if ($this->settings['ss_leads_timestamp_from_date'] === '-') {
+        $timestamp = -1;
+      }
+      elseif ($this->settings['ss_leads_timestamp_from_date'] !== '--') {
+        $timestamp = strtotime($this->settings['ss_leads_timestamp_from_date']); // @TODO Note that we don't subtract the overlap here. If this setting has a value, it's supposed to have the overlap subtracted already.
+        if (!$timestamp) {
+          if (!$for_display) {
+            throw new RuntimeException("Invalid 'ss_leads_timestamp_from_date' setting specified; not a parseable date expression.");
+          }
+          $timestamp = 0;
+        }
+      }
+      else {
+        if (!$for_display) {
+          // This is too dangerous (and could be a typo when '-' was meant);
+          throw new RuntimeException("'ss_leads_timestamp_from_date' setting must not be '--'.");
+        }
+        // We don't support '--'. Interpret as '-'.
+        $timestamp = -1;
+      }
+    }
+    else {
+      // For the variable names we assume that the job IDs include the module
+      // name and will therefore be namespaced alreaady.
+      $timestamp = variable_get($this->settings['job_id'] . '_ts_kvupdate', 0);
+      if ($timestamp) {
+        $timestamp -= static::KEYVALUE_UPDATE_OVERLAP;
+        // Check the cron schedule to see if a full refresh is due.
+        // @todo We should refresh from cron too, not only UI. But how? Isn't this too expensive?
+        if (!$for_display && $this->isStartedFromUI()) {
+          $calculator = new DrunkinsCronTab(static::KEYVALUE_REFRESH_SCHEDULE);
+          $next = $calculator->nextTime($timestamp);
+          if ($next <= time()) {
+            $timestamp = 0;
+          }
+        }
+      }
+    }
+
+    return $timestamp;
+  }
+
+  /**
+   * Sets the time from which our local leads cache should be refreshed next.
+   *
+   * @param bool $timestamp
+   *   The timestamp from which our local leads cache should be refreshed next
+   *   time (disregarding the 'overlap' which will still be applied to it).
+   */
+  protected function setLastLeadCacheUpdateTime($timestamp) {
+    variable_set($this->settings['job_id'] . '_ts_kvupdate', $timestamp);
   }
 
   /**
