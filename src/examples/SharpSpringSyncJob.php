@@ -269,12 +269,10 @@ class SharpSpringSyncJob extends DrunkinsJob {
       '#description' => t('These options govern logging with the "Start batch" action, and display/visibility of items with the "Display" action.'),
       '#weight' => 14,
     );
-    // We always want to log clashes for incremental updates - partly because
-    // we want the default to be TRUE in non-interactive runs.
+    // This option is almost useless because it only governs 'action code 1'.
     $form['logging_display']['log_include_clashes'] = array(
       '#type' => 'checkbox',
       '#title' => t("Log about / include inactive items that won't be sent because they are duplicates of another active contact (action code 1)"),
-      '#description' => t('True if "changed since" is not ignored.'),
       '#weight' => 1,
       '#states' => array('enabled' => array(
         ':input[name="fetcher_timestamp_ignore"]' => array('checked' => TRUE),
@@ -694,9 +692,22 @@ class SharpSpringSyncJob extends DrunkinsJob {
         throw new RuntimeException("Internal error (code should be changed): could not determine what to do with contact {$this->getLeadDescription($lead)}.");
       }
       else {
+        $preprocessed_items[$lead_key] = array($lead, $compare ? $compare['id'] : 0, $lead_action_code);
+        // Update the 'seen' caches. (We know that if we are >3, any existing
+        // lead referenced in there currently will have been set to 1 or 2.)
+        if ($compare && ($lead_action_code > 3 || !isset($seen_ss_ids[$compare['id']]))) {
+          $seen_ss_ids[$compare['id']] = $lead_key;
+        }
+        if (!empty($lead->emailAddress) && ($lead_action_code > 3 || !isset($seen_emails[$lead->emailAddress]))) {
+          $seen_emails[$lead->emailAddress] = $lead_key;
+        }
+        $lead_key++;
+
         if (!empty($this->settings['list_format']) && !empty($this->settings['display_changed_values']) && count($compare) > 1) {
           // Add the 'changed' old values into the lead. We'll need to convert
-          // fieldnames to properties.
+          // fieldnames to properties. (Do this after we don't need
+          // the lead properties anymore, for above caching. the lead will still
+          // get updated inside $preprocessed_items.)
           // @todo this is not fully done yet - at the moment we add HTML tags
           //    but do not escape values, and print the full value (with HTML)
           //    escaped in the list. (Which obviously is weird - but at least we
@@ -716,17 +727,6 @@ class SharpSpringSyncJob extends DrunkinsJob {
             }
           }
         }
-
-        $preprocessed_items[$lead_key] = array($lead, $compare ? $compare['id'] : 0, $lead_action_code);
-        // Update the 'seen' caches. (We know that if we are >3, any existing
-        // lead referenced in there currently will have been set to 1 or 2.)
-        if ($compare && ($lead_action_code > 3 || !isset($seen_ss_ids[$compare['id']]))) {
-          $seen_ss_ids[$compare['id']] = $lead_key;
-        }
-        if (!empty($lead->emailAddress) && ($lead_action_code > 3 || !isset($seen_emails[$lead->emailAddress]))) {
-          $seen_emails[$lead->emailAddress] = $lead_key;
-        }
-        $lead_key++;
       }
     }
     unset($seen_emails);
@@ -773,7 +773,7 @@ class SharpSpringSyncJob extends DrunkinsJob {
     $items = array();
     if (!empty($this->settings['list_format'])) {
       $include_noops = !empty($this->settings['log_include_noops']) || $this->processingIncrementalFromDate();
-      $include_clashes = !empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate();
+      $include_clashes = !empty($this->settings['log_include_clashes']);
       foreach ($preprocessed_items as $item) {
         if (($item[2] != 10 || $include_noops)
             && ($item[2] != 1 || $include_clashes)) {
@@ -827,10 +827,7 @@ class SharpSpringSyncJob extends DrunkinsJob {
 
       // Mail the user beforehand about errors that were not queued, not at
       // finish(), in case the sync process gets hopelessly stuck.
-      if ($context['skipped']
-          // This line is also in logCanceledUpdate():
-          && (!empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate())
-          && !$this->isStartedFromUI()) {
+      if ($context['skipped'] && !$this->isStartedFromUI()) {
         drupal_mail('ict_comm', 'sync_skipped', variable_get("ict_comm_afas_comm_error_mail", 'roderik@yellowgrape.nl'), language_default(), array('nr_warnings' => count($context['skipped']), 'logs' => $this->temporaryLogs));
       }
     }
@@ -848,10 +845,8 @@ class SharpSpringSyncJob extends DrunkinsJob {
    * still change it to take e.g. the action codes into account.
    */
   protected function logCanceledUpdate(LeadWithSourceId $kept_lead, LeadWithSourceId $skipped_lead, $descn) {
-    if (!empty($this->settings['log_include_clashes']) || $this->processingIncrementalFromDate()) {
-      $this->logAndStore("Source system contains duplicate records $descn: @c1 and @c2. One of them should have Sharpspring synchronization disabled. We are skipping the latter.",
-        array('@c1' => $this->getLeadDescription($kept_lead), '@c2' => $this->getLeadDescription($skipped_lead)), WATCHDOG_WARNING);
-    }
+    $this->logAndStore("Source system contains duplicate records $descn: @c1 and @c2. One of them should have Sharpspring synchronization disabled. We are skipping the latter.",
+      array('@c1' => $this->getLeadDescription($kept_lead), '@c2' => $this->getLeadDescription($skipped_lead)), WATCHDOG_WARNING);
   }
 
   protected function logAndStore($message, array $variables = array(), $severity = WATCHDOG_NOTICE) {
