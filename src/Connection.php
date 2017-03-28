@@ -2,6 +2,8 @@
 
 namespace SharpSpring\RestApi;
 
+use Psr\Log\LoggerInterface;
+
 /**
  * Sharpspring REST API Connection object designed to make coders' lives easier.
  *
@@ -11,6 +13,9 @@ namespace SharpSpring\RestApi;
  * take care of abstracting away some tediousness and provide documentation with
  * each method. All methods wrap around a generic call() method; it is allowed
  * but hopefully not necessary to use call(), because wrapper functions exist.
+ *
+ * For more information on the values contained within the 'table row(s)' that
+ * calls return as arrays, see Sharpspring's API ("Schema") documentation.
  *
  * This class performs quite strict validation on the JSON values returned from
  * API calls, especially since the API response can contain duplicate info. If
@@ -36,10 +41,18 @@ namespace SharpSpring\RestApi;
  * credentials can be handled completely separately from this class' logic.
  */
 class Connection {
+
   /**
    * A REST API client.
    */
   protected $client;
+
+  /**
+   * PSR-3 compatible logger.
+   *
+   * @var \Psr\Log\LoggerInterface
+   */
+  protected $logger;
 
   /**
    * The property to field name mappings for custom Sharpspring fields.
@@ -52,14 +65,40 @@ class Connection {
   protected $customPropertiesByType;
 
   /**
+   * The response from the last API call.
+   *
+   * @var array
+   */
+  protected $lastCallResponse;
+
+  /**
    * Constructor.
    *
    * @param object $client
    *   The client object responsible for making the actual API calls. (Not
    *   typehinted because there is no formal interface.)
+   * @param \Psr\Log\LoggerInterface $logger
+   *   (optional) A logger.
    */
-  public function __construct($client) {
+  public function __construct($client, LoggerInterface $logger = NULL) {
     $this->client = $client;
+    $this->logger = $logger;
+  }
+
+  /**
+   * Log a message; ignore it if no logger was set.
+   *
+   * @param mixed $level
+   *   A string representation of a level. (No idea why PSR-3 defines "mixed".)
+   * @param string $message
+   *   The message.
+   * @param array $context
+   *   The log context. See PSR-3.
+   */
+  protected function log($level, $message, array $context = []) {
+    if (isset($this->logger)) {
+      $this->logger->log($level, $message, $context);
+    }
   }
 
   /**
@@ -199,6 +238,49 @@ class Connection {
   }
 
   /**
+   * Sets the response from the last API call.
+   *
+   * @param array $response
+   *   The response array received from the last API call.
+   * @param string
+   *   The method called (for logging purposes).
+   *
+   * @see getLastCallResponse
+   */
+  protected function setLastCallResponse(array $response, $method = '') {
+    $this->lastCallResponse = $response;
+    $unknown = array_diff_key($response,['id' => 1, 'result' => 1, 'error' => 1, 'hasMore' => 1]);
+    if ($unknown) {
+      // If this actually starts emitting notices, we should revisit the code to
+      // see if we should do anything with the extra property.
+      $this->log('notice', "Extra properties found in $method API response from method: " . json_encode($unknown));
+    }
+  }
+
+  /**
+   * Returns the full response from the last API call.
+   *
+   * Usually the response only contains id, result and error keys and call()
+   * returns only the 'result' part. Some calls, however, return additional
+   * properties which can only be retrieved by calling this method after an
+   * API call.
+   *
+   * This method is an afterthought and its use is unclear, since it seems that
+   * a caller only really needs 'result'. The only additional property we know
+   * of is 'hasMore', which is only returned for some calls, and whose exact use
+   * is unclear and also seems buggy (because for all these cases, 'hasMore' is
+   * both next to and inside the 'result' structure). Still, we did not want to
+   * make any properties totally unreachable to calling code. If any properties
+   * besides 'hasMore' are ever found, this fact will be logged.
+   *
+   * @return array
+   *   Miscellaneous properties present in the last API call response.
+   */
+  protected function getLastCallResponse() {
+    return $this->lastCallResponse;
+  }
+
+  /**
    * Call a REST API.method.
    *
    * @param string $method
@@ -241,6 +323,24 @@ class Connection {
    */
   public function call($method, array $params, array $response_checks = array()) {
     $response = $this->client->call($method, $params);
+    $this->setLastCallResponse($response);
+    // Some methods (getClients, get(Removed)ListMembers,
+    // getUnsubscribeCategories) return a 'hasMore' value inside $response AND
+    // inside $response['result']. This seems to be a bug. Just unset/ignore the
+    // one in 'result', so our 'single_result_key' response check works.
+    if (isset($response['result']['hasMore'])) {
+      if (!isset($response['hasMore'])) {
+        // Now getLastCallResponse() won't return any 'hasMore'. Since this
+        // whole 'hasMore' implementation seems incomplete anyway, with unclear
+        // use, this will be the only time we'll live with this and only log,
+        // instead of throwing an exception.
+        $this->log('error', "'hasMore' indicator set in API response result from method $method, but not present on the first level of the response: " . json_encode($response['result']['hasMore']));
+      }
+      if ($response['hasMore'] !== $response['result']['hasMore']) {
+        $this->log('error', "'hasMore' value on the first level of the API response from method $method (" . json_encode($response['hasMore']) . " is different from 'hasMore' value in the response result (" . json_encode($response['result']['hasMore']) . ').');
+      }
+      unset($response['result']['hasMore']);
+    }
 
     if (empty($response['error']) && !isset($response['result'])) {
       throw new \UnexpectedValueException("Sharpspring REST API systemic error: response contains neither error nor result.\nResponse: " . json_encode($response), 3);
@@ -858,7 +958,7 @@ class Connection {
    *   exists...
    *
    * @return array
-   *   A lead structure (in array format as returned from the REST API; not as
+   *   A lead table row (in array format as returned from the REST API; not as
    *   a Lead object). Empty array if not found.
    *
    * @todo here and in getLeads, do a 'fix' property to convert nulls to empty
@@ -889,7 +989,7 @@ class Connection {
   }
 
   /**
-   * Retrieves a number of lead objects.
+   * Retrieves a list of Lead objects.
    *
    * @param array $where
    *   A key-value array containing ONE item only, with key being either 'id' or
@@ -910,10 +1010,9 @@ class Connection {
    *   getLead().
    *
    * @return array
-   *   An array of lead structures (in array format as returned from the REST
-   *   API; not as Lead objects). The response does not wrap the leads inside
-   *   another array that also has a 'hasMore' indicator, like with some other
-   *   calls. See getLead() for comment on 'null string values'.
+   *   An array of lead table rows (in array format as returned from the REST
+   *   API; not as Lead objects). See getLead() for comment on 'null string
+   *   values'.
    */
   public function getLeads($where = [], $limit = NULL, $offset = NULL, $options = []) {
     $leads = $this->callLimited('getLeads', 'lead', $where, $limit, $offset);
@@ -962,7 +1061,7 @@ class Connection {
    *   return. Zero-based.
    *
    * @return array
-   *   An array of Lead structures.
+   *   An array of Lead table rows.
    *
    * @see Lead::$updateTimestamp
    */
@@ -982,7 +1081,7 @@ class Connection {
    *   (optional) Offset.
    *
    * @return array
-   *   An array of Field structures. (Note: no 'hasMore' indicator.)
+   *   An array of Field table rows.
    */
   public function getFields($limit = NULL, $offset = NULL) {
     return $this->callLimited('getFields', 'field', [], $limit, $offset);
@@ -994,7 +1093,7 @@ class Connection {
    * @param int $id
    *
    * @return array
-   *   An Account structure.
+   *   An Account table row.
    */
   public function getAccount($id) {
     $params['id'] = $id;
@@ -1007,7 +1106,7 @@ class Connection {
   }
 
   /**
-   * Retrieves a number of Account objects.
+   * Retrieves a list of Account objects.
    *
    * @param array $where
    *   (optional) Conditions
@@ -1019,7 +1118,7 @@ class Connection {
    *   (optional) Offset.
    *
    * @return mixed
-   *   An array of Account structures. (Note: no 'hasMore' indicator.)
+   *   An array of Account table rows.
    */
   public function getAccounts(array $where = [], $limit = NULL, $offset = NULL) {
     return $this->callLimited('getAccounts', 'account', $where, $limit, $offset);
@@ -1037,7 +1136,7 @@ class Connection {
    *   (optional) The field to filter for dates: 'update' (default) or 'create'.
    *
    * @return array
-   *   An array of Account structures.
+   *   An array of Account table rows.
    *
    * @see Lead::$updateTimestamp
    */
@@ -1054,7 +1153,7 @@ class Connection {
    * @param int $id
    *   The campaign ID.
    * @return array
-   *   A Campaign structure.
+   *   A Campaign table row.
    */
   public function getCampaign($id) {
     $params['id'] = $id;
@@ -1067,7 +1166,7 @@ class Connection {
   }
 
   /**
-   * Retrieves a number of Campaign objects.
+   * Retrieves a list of Campaign objects.
    *
    * @param array $where
    *   (optional) Conditions
@@ -1079,7 +1178,7 @@ class Connection {
    *   (optional) Offset.
    *
    * @return array
-   *   An array of Campaign structures. (Note: no 'hasMore' indicator.)
+   *   An array of Campaign table rows.
    */
   public function getCampaigns(array $where = [], $limit = NULL, $offset = NULL) {
     return $this->callLimited('getCampaigns', 'campaign', $where, $limit, $offset);
@@ -1097,7 +1196,7 @@ class Connection {
    *   (optional) The field to filter for dates: 'update' (default) or 'create'.
    *
    * @return array
-   *   An array of Campaign structures. (Note: no 'hasMore' indicator.)
+   *   An array of Campaign table rows.
    *
    * @see Lead::$updateTimestamp
    */
@@ -1111,16 +1210,17 @@ class Connection {
   /**
    * Retrieves a list of all active companies managed by your company.
    *
-   * @return array
-   * Result with 2 keys:
-   * - getAllcompanyProfileManagedBys
-   * - hasMore
+   * The API response contains a 'hasMore' property, which can be accessed
+   * through getLastCallResponse().
    *
-   * @todo check what to do with hasMore, if this is always there
-   * @todo single_result_key?
+   * @return array
+   *   An array of Client table rows (The Schema tab which documents the
+   *   returned fields calls the table Client, though the Methods tab calls it
+   *   Company Profile Managed By - which is also visible in the API response
+   *   structure.)
    */
   public function getClients() {
-    return $this->call('getClients', []);
+    return $this->call('getClients', [], ['single_result_key' => 'getAllcompanyProfileManagedBys']);
   }
 
   /**
@@ -1129,7 +1229,7 @@ class Connection {
    * @param int $id
    *
    * @return array
-   *   A DealStage structure.
+   *   A DealStage table row.
    */
   public function getDealStage($id) {
     $params['id'] = $id;
@@ -1143,7 +1243,7 @@ class Connection {
 
 
   /**
-   * Retrieves a number of Deal Stage objects.
+   * Retrieves a list of Deal Stage objects.
    *
    * @param array $where
    *   (optional) Conditions
@@ -1155,7 +1255,7 @@ class Connection {
    *   (optional) Offset.
    *
    * @return array
-   *   An array of DealStage structures.
+   *   An array of DealStage table rows.
    */
   public function getDealStages(array $where = [], $limit = NULL, $offset = NULL) {
     return $this->callLimited('getDealStages', 'dealStage', $where, $limit, $offset);
@@ -1173,7 +1273,7 @@ class Connection {
    *   (optional) The field to filter for dates: 'update' (default) or 'create'.
    *
    * @return array
-   *   An array of DealStage structures.
+   *   An array of DealStage table rows.
    *
    * @see Lead::$updateTimestamp
    */
@@ -1187,11 +1287,6 @@ class Connection {
   /**
    * Retrieves a list of active Lists.
    *
-   * As of v1.1.17, the API documentation says that the 'where' parameter is
-   * "optional", whereas in other places it says "required" (even when it may be
-   * empty). The documentation is inconsistent; the 'where' parameter is
-   * required here too (though it may be empty).
-   *
    * @param int $id
    *   (optional) List ID.
    * @param int $limit
@@ -1200,10 +1295,13 @@ class Connection {
    *   (optional) Offset.
    *
    * @return array
-   *   An array of List structures.
+   *   An array of List table rows.
    */
   public function getActiveLists($id = NULL, $limit = NULL, $offset = NULL) {
-    // 'where' is a required parameter but it may be empty.
+    // 'where' is a required parameter but it may be empty. (The API v1.1.17
+    // documentation says that the 'where' parameter is "optional", but it's
+    // wrong; it is actually required (and for other calls it says "required",
+    // even when it may be empty).
     $where = [];
     if (isset($id)) {
       $where['id'] = $id;
@@ -1212,7 +1310,7 @@ class Connection {
   }
 
   /**
-   * Retrieves the active members for a specific list
+   * Retrieves the active members for a list.
    *
    * @param int $id
    *   List ID. Unknown values will not return a validation error; they will
@@ -1224,19 +1322,21 @@ class Connection {
    *   return. Zero-based.
    *
    * @return array
-   * Result with 2 keys:
-   * - getWherelistLeadMembers
-   * - hasMore
-   *
-   * @todo check what to do with hasMore, if this is always there
+   *   An array of ActiveListMember table rows. (Not ListMember table rows;
+   *   those have a different structure. The Schema tab which documents the
+   *   returned fields calls the table ActiveListMember, though the Methods
+   *   tab calls it listMembers.)
    */
   public function getListMembers($id, $limit = NULL, $offset = NULL) {
     $where = ['id' => $id];
-    return $this->callLimited('getListMembers', '', $where, $limit, $offset);
+    return $this->callLimited('getListMembers', 'getWherelistMemberGets', $where, $limit, $offset);
   }
 
   /**
    * Retrieves the members that are removed from a list.
+   *
+   * The API response contains a 'hasMore' property, which can be accessed
+   * through getLastCallResponse().
    *
    * @param int $id
    *   List ID. Unknown values will not return a validation error; they will
@@ -1252,31 +1352,32 @@ class Connection {
    *   return. Zero-based.
    *
    * @return array
-   *   Same format as getListMembers.
-
-   * @todo see getListMembers
+   *   An array of RemovedListMember table rows. (The Schema tab which documents
+   *   the returned fields calls the table RemovedListMember, though the Methods
+   *   tab calls it listLeadMember - which is also visible in the API response
+   *   structure.) The email field is actually 'emailaddress', not
+   *  'emailAddress' as documented.
    */
   public function getRemovedListMembers($id, $flag = NULL, $limit = NULL, $offset = NULL) {
     $where = ['id' => $id];
     if (isset($flag)) {
       $where['flag'] = $flag;
     }
-    return $this->callLimited('getRemovedListMembers', '', $where, $limit, $offset);
+    $result = $this->callLimited('getRemovedListMembers', 'getWherelistLeadMembers', $where, $limit, $offset);
+    return $result;
   }
 
   /**
-   * UNKNOWN.
+   * Retrieves UnsubscribeCategory objects. (See the API docs.)
+   *
+   * The API response contains a 'hasMore' property, which can be accessed
+   * through getLastCallResponse().
    *
    * @return array
-   * Result with 2 keys:
-   * - getAllunsubscribeCategorys
-   * - hasMore
-   *
-   * @todo check what to do with hasMore, if this is always there
-   * @todo single_result_key?
+   *   An array of UnsubscribeCategory table rows.
    */
   public function getUnsubscribeCategories() {
-    return $this->call('getUnsubscribeCategories', []);
+    return $this->call('getUnsubscribeCategories', [], ['single_result_key' => 'getAllunsubscribeCategorys']);
   }
 
 }
