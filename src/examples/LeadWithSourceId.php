@@ -12,10 +12,10 @@ use SharpSpring\RestApi\Lead;
  * object instead of an array, so that the custom fieldname for the source ID is
  * automatically converted (if the job is properly configured).
  */
-class LeadWithSourceId extends Lead {
-
-  /**
-   * The internal ID of the contact object in the source system.
-   */
-  public $sourceId;
+class LeadWithSourceId extends Lead
+{
+    /**
+     * The internal ID of the contact object in the source system.
+     */
+    public $sourceId;
 }
