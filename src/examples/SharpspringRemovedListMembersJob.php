@@ -212,10 +212,11 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
             $context['sharpspring_active_lists'] = $connection->getActiveLists();
         }
         while ($list = array_shift($context['sharpspring_active_lists'])) {
-            // We don't know if the 'removedCount' property of a list is also
-            // non-zero if there are any hard bounces. My guess is it is, but
-            // for now we won't take chances.
-            $removed_types_to_check = empty($list['removedCount']) ? ['unsubscribed', 'hardbounced'] : ['removed', 'unsubscribed', 'hardbounced'];
+            // Given the field values observed/documented in getFieldToUpdate(),
+            // we will assume that removedCount is non-zero if there are *any*
+            // bounces or unsubscribed, so we don't need to check everything.
+//            $removed_types_to_check = empty($list['removedCount']) ? ['unsubscribed', 'hardbounced'] : ['removed', 'unsubscribed', 'hardbounced'];
+            $removed_types_to_check = empty($list['removedCount']) ? [] : ['removed'];
             foreach ($removed_types_to_check as $removed_type) {
                 $members = $connection->getRemovedListMembers($list['id'], $removed_type);
                 $i = 0;
@@ -248,19 +249,11 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
                     }
                     $i++;
                 }
-
-                // @TODO remove this in time and then adjust $removed_types_to_check. If
-                //       I'm right in assuming that removedCount governing all types,
-                //       this log should never happen.
-                if ($i && empty($list['removedCount'])) {
-                    $this->log("RemovedListMembers found of type $removed_type in list $list[id]. The code should be re-commented to say that this is actually a thing.", [], WATCHDOG_NOTICE);
-                }
             }
 
             // To prevent timeouts: with each consecutive call to start(),
-            // process one list which actually has removed members (i.e. make
-            // several getRemovedListMembers() calls) and indicate we should
-            // loop back here.
+            // process one list which actually has removed members and indicate
+            // we should loop back here.
             if ($removed_types_to_check && empty($this->settings['list_format'])) {
                 $context['drunkins_process_more'] = !empty($context['sharpspring_active_lists']);
                 if ($context['drunkins_process_more']) {
