@@ -36,7 +36,7 @@ class Drupal7SqlStorage
 
     public function get($key, $default = null)
     {
-        $values = $this->getMultiple(array($key));
+        $values = $this->getMultiple([$key]);
         return isset($values[$key]) ? $values[$key] : $default;
     }
 
@@ -49,20 +49,20 @@ class Drupal7SqlStorage
 
     public function delete($key)
     {
-        $this->deleteMultiple(array($key));
+        $this->deleteMultiple([$key]);
     }
 
     // Backend specific:
 
     public function has($key)
     {
-        return (bool)db_query("SELECT 1 FROM {{$this->table}} WHERE name = :name", array(':name' => $key))
+        return (bool)db_query("SELECT 1 FROM {{$this->table}} WHERE name = :name", [':name' => $key])
             ->fetchField();
     }
 
     public function getMultiple(array $keys)
     {
-        $values = db_query("SELECT name, value FROM {{$this->table}} WHERE name IN ( :keys )", array(':keys' => $keys))->fetchAllKeyed();
+        $values = db_query("SELECT name, value FROM {{$this->table}} WHERE name IN ( :keys )", [':keys' => $keys])->fetchAllKeyed();
         foreach ($values as $key => $value) {
             $values[$key] = unserialize($value);
         }
@@ -81,8 +81,8 @@ class Drupal7SqlStorage
     public function set($key, $value)
     {
         db_merge($this->table)
-            ->key(array('name' => $key))
-            ->fields(array('value' => serialize($value)))
+            ->key(['name' => $key])
+            ->fields(['value' => serialize($value)])
             ->execute();
     }
 
