@@ -4,14 +4,16 @@ namespace SharpSpring\RestApi;
 
 use InvalidArgumentException;
 use RuntimeException;
+use UnexpectedValueException;
 
 /**
  * A simple Sharpspring 'Client' object working with the curl library.
  *
- * It is responsible for several things: the way of making a connection (the
- * library used for this); the way in which credentials are set / retrieved; and
- * the request IDs for individual calls. It did not seem necessary to split
- * these out just yet.
+ * It is responsible for several things: the way of (/library used for)
+ * establishing a connection; the way in which credentials are set / retrieved;
+ * (filling/checking) the request IDs for individual calls; and decoding
+ * wrongly encoded responses from the endpoint. It did not seem necessary to
+ * split these things out into different classes just yet.
  */
 class CurlClient
 {
@@ -141,6 +143,11 @@ class CurlClient
      *
      * @return array
      *   A structure corresponding to the JSON response returned by the API.
+     *     The
+     *   values of individual fields are apparently always HTML-encoded. (At
+     *   least in a Lead's fields, '>' is encoded to '&gt;'; that's what we
+     *     know
+     *   for sure.)
      *
      * @throws \UnexpectedValueException
      *   If the REST API response has an unexpected format.
@@ -151,11 +158,6 @@ class CurlClient
         // class because that will hopefully be easier to change/subclass than
         // if this code were in the connection object.
         $request_id = session_id();
-        $data = json_encode([
-            'method' => $method,
-            'params' => $params,
-            'id' => $request_id,
-        ]);
 
         // Curl options that we really need for this particular call/code to
         // work:
@@ -164,7 +166,11 @@ class CurlClient
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER => false,
             CURLOPT_CUSTOMREQUEST => 'POST',
-            CURLOPT_POSTFIELDS => $data,
+            CURLOPT_POSTFIELDS => json_encode([
+                'method' => $method,
+                'params' => $params,
+                'id' => $request_id,
+            ]),
         ];
         $ch = curl_init();
         curl_setopt_array($ch, $forced_options + $this->options['curl_options']);
@@ -185,15 +191,15 @@ class CurlClient
             throw new RuntimeException("CURL returned HTTP code $http_code / Response body: \"$response\"", $http_code + 1000);
         }
 
-        $response = json_decode($response, true);
+        $response = static::decodeResponse($response, $method, $params);
         // In circumstances that should never happen according to the API docs,
         // we throw exceptions without doing anything else. It will be up to the
         // caller to safely halt the execution and alert a human to investigate.
         if (!isset($response['id'])) {
-            throw new \UnexpectedValueException("Sharpspring REST API systemic error: no id found in JSON response from SharpspringAPI endpoint. This should never happen.\nResponse: " . json_encode($response), 1);
+            throw new UnexpectedValueException("Sharpspring REST API systemic error: no id found in JSON response from Sharpspring API endpoint. This should never happen.\nResponse (possibly double-encoded): " . json_encode($response), 1);
         }
         if ($response['id'] != $request_id) {
-            throw new \UnexpectedValueException("Sharpspring REST API systemic error: unexpected id value found in JSON response from SharpspringAPI endpoint. This should never happen.\nRequest ID: $request_id\nResponse: " . json_encode($response), 2);
+            throw new UnexpectedValueException("Sharpspring REST API systemic error: unexpected id value found in JSON response from Sharpspring API endpoint. This should never happen.\nRequest ID: $request_id\nResponse (possibly double-encoded): " . json_encode($response), 2);
         }
 
         return $response;
@@ -211,5 +217,54 @@ class CurlClient
             'secretKey' => $this->options['secret_key'],
         ];
         return static::SHARPSPRING_BASE_URL . '?' . http_build_query($query);
+    }
+
+    /**
+     * Decodes a response from the REST API and fixes strange issues.
+     *
+     * This is a public static function (with a 'mixed' first argument), so
+     * unrelated code can choose to call it to fix up known issues with field
+     * values. These are discussed in encoding.md.
+     *
+     * The method accepts optional arguments for method/parameters. Though it
+     * does not do anything with them at the moment, it might later - or a
+     * child class might.
+     *
+     *
+     * @param string|array $response
+     *   The response to decode
+     * @param string $method
+     *   (optional) The REST API method called.
+     * @param array $params
+     *   (optional) The parameters to the REST API method.
+     *
+     * @return mixed
+     *   The decoded response. At this moment this will never be null, though
+     *   support for that might be added when needed.
+     *
+     * @throws \UnexpectedValueException
+     *   For invalid JSON (or null value).
+     */
+    public static function decodeResponse($response, $method = '', array $params = null)
+    {
+        if (!is_array($response)) {
+            $response = json_decode($response, true);
+            if ($response === NULL) {
+                throw new UnexpectedValueException("Response holds invalid JSON (or null).\nValue (possibly double-encoded): " . json_encode($response), 3);
+            }
+        }
+        // See encoding.md: values entered from the UI are probably all HTML
+        // encoded _except_ for custom fields. And values entered through a REST
+        // endpoint are not. Even stranger: '<' characters are _double_
+        // encoded. So we'll just assume that no values are _supposed_ to
+        // contain HTML, and decode everything. We can either double-decode
+        // everything, or decode + replace only &lt; characters. We'll do the
+        // last thing, so if a caller still sees HTML at that point, they can /
+        // should investigate what is wrong in their setup.
+        array_walk_recursive($response, function (&$v) {
+            $v = str_replace('&lt;', '<', htmlspecialchars_decode($v));
+        });
+
+        return $response;
     }
 }
