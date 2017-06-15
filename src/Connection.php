@@ -76,9 +76,11 @@ class Connection
      *
      * @param object $client
      *   The client object responsible for making the actual API calls. (Not
-     *   typehinted because there is no formal interface.)
+     *   typehinted because there is no formal interface; it must have a
+     *   call() method with the same signature as CurlClient::call().)
      * @param \Psr\Log\LoggerInterface $logger
-     *   (optional) A logger.
+     *   (optional) A logger. It's doubtful that anything will ever be logged at
+     *   the moment; as a rule, exceptions are thrown for errors.
      */
     public function __construct($client, LoggerInterface $logger = null)
     {
@@ -293,8 +295,8 @@ class Connection
      *
      * Usually the response only contains id, result and error keys and call()
      * returns only the 'result' part. Some calls, however, return additional
-     * properties which can only be retrieved by calling this method after an
-     * API call.
+     * properties which can only be retrieved by calling this method after
+     * calling call().
      *
      * This method is an afterthought and its use is unclear, since it seems
      * that a caller only really needs 'result'. The only additional property
@@ -1001,7 +1003,7 @@ class Connection
      *   values leadStatus = open, and all custom fields with an empty value; no
      *   other values. This class chooses to not alter return values by default
      *   (because who knows what hidden problems that could cause), in the hope
-     *   that the REST API will be fixed). This means that until then, you have
+     *   that the REST API will be fixed. This means that until then, you have
      *   a choice between passing [ 'fix_empty_leads' => true ] into this method
      *   and assuming that a non-empty return value does not actually mean that
      *   a lead exists...
