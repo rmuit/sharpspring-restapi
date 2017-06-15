@@ -36,15 +36,15 @@ class ValueObject
      * All property names in the object that are nullable.
      *
      * Most defined properties in a new object start out as unset === null. We
-     * don't want to send null for all those property values, so toArray()
-     * unsets all null properties. The problem with that is, some properties
-     * have to be able to be set explicitly to null in e.g. updateLead calls.
+     * don't want to send null for all those property values in update/create
+     * calls, so toArray() by default does not return any properties with a null
+     * value. (See comments above.) The issue with that is: there are properties
+     * which we have to be able to set explicitly to null in e.g. REST API
+     * update calls.
      *
-     * The properties specified by name here should be kept if they are null -
-     * and are unset only if they contain "\0" instead. These properties
-     * typically are defined with: public $propertyName = "\0"; They should
-     * only be null / undefined by default if you intend for toArray() to keep
-     * them by default.
+     * The properties specified by name here will start out as "\0" (when a
+     * class instance is constructed), and if they are set to null explicitly
+     * they will be present in the return value of toArray().
      *
      * @var array
      */
@@ -91,6 +91,12 @@ class ValueObject
         // We assume no duplicate properties are set to the same field system
         // name. If so, it is unclear which property will be filled.
         $custom_fields = array_flip($custom_properties);
+
+        // Initialize nullable properties first; they can be overwritten by
+        // null values if these are provided in $values.
+        foreach ($this->_nullableProperties as $name) {
+            $this->$name = "\0";
+        }
         foreach ($values as $name => $value) {
             if (isset($custom_fields[$name])) {
                 $name = $custom_fields[$name];

@@ -54,7 +54,7 @@ class Lead extends ValueObject
      *
      * @var bool
      */
-    public $active = "\0";
+    public $active;
 
     /**
      * Is Unsubscribed?
@@ -64,7 +64,7 @@ class Lead extends ValueObject
      *
      * @var bool
      */
-    public $isUnsubscribed = "\0";
+    public $isUnsubscribed;
 
     /**
      * SharpSpring ID.
@@ -105,14 +105,14 @@ class Lead extends ValueObject
      *
      * @var int|null
      */
-    public $ownerID = "\0";
+    public $ownerID;
 
     /**
      * Account ID.
      *
      * @var int|null
      */
-    public $accountID = "\0";
+    public $accountID;
 
     /**
      * Lead Status.
