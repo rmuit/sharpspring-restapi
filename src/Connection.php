@@ -138,28 +138,48 @@ class Connection
     }
 
     /**
-     * Converts external input object/array to something the REST API can use.
+     * Converts an external object/array to/from an array used by the REST API.
      *
      * The difference with the toArray() method on the object itself is that
-     * this method maps custom properties that may have been set on the
-     * Connection object.
+     * this method additionally maps custom properties that are set on this
+     * Connection instance. Also, this accepts arrays as input.
      *
      * @param string $object_type
      *   Type of object to set mapping for: 'lead', 'opportunity', 'account'.
      * @param \SharpSpring\RestApi\ValueObject|array $object
      *   An input object/array.
+     * @param bool $reverse
+     *   If true, convert from (rather than to) system names; output an array
+     *   that has custom property names as keys, using the custom property
+     *   mapping set on this Connection instance. In this case, the input must
+     *   be an array, and should likely be a literal REST API result.
      *
      * @return array
-     *   An array representing a Sharpspring 'object', that can be used in e.g.
-     *   a create/update REST API call. If the input argument is an array, this
-     *   will be the same except the custom properties/fields are converted to
-     *   their field system names, if the mapping is set in this class.
+     *   By default: an array representing a Sharpspring 'object', that can be
+     *   used in e.g. a create/update REST API call. If the input is an array,
+     *   the output will be the same except any custom property names are
+     *   converted to field system names, according to the custom property
+     *   mapping set on this Connection instance. If $reverse is true, then an
+     *   array with custom properties, that can be used by e.g. custom code
+     *   that cannot work with arbitrary system names, or to construct value
+     *   objects that don't have their own custom property mapping.
      */
-    public function toArray($object_type, $object)
+    public function toArray($object_type, $object, $reverse = FALSE)
     {
         $custom_properties = isset($this->customPropertiesByType[$object_type]) ? $this->customPropertiesByType['lead'] : [];
         if (is_object($object) && method_exists($object, 'toArray')) {
+            if ($reverse) {
+                // ValueObjects don't support this; they always convert _from_
+                // properties, by definition.
+                throw new \InvalidArgumentException("The input 'object' must be an array.", 99);
+            }
             return $object->toArray($custom_properties);
+        }
+
+        if ($reverse) {
+          // We blindly assume no duplicate properties are mapped to the same
+          // field system name.
+          $custom_properties = array_flip($custom_properties);
         }
 
         // Basically a simpler version of ValueObject::toArray(). This can
