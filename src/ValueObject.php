@@ -130,12 +130,15 @@ class ValueObject
      *
      * This is (/ should be) always used for converting our class instances into
      * 'object representations' (arrays) that can be sent into Sharpspring with
-     * e.g. create/update calls.
+     * e.g. create/update calls. Any class properties that start with an
+     * underscore are skipped, unless these are mentioned explicitly as custom
+     * properties.
      *
      * @param array $custom_properties
      *   The custom property name to Sharpspring field system name mapping,
-     *   which should be used. Any fields not specified here will be taken from
-     *   $this->_customProperties if they are defined there.
+     *   which should be used. Properties which are not specified in this
+     *   argument but are defined in $this->_customProperties will also be
+     *   mapped.
      *
      * @return array
      *   The array value for this object.
@@ -151,7 +154,8 @@ class ValueObject
         // their case the 'skip' value is "\0".
         $nullable = array_flip($this->_nullableProperties);
         foreach ($this as $name => $value) {
-            if (strpos($name, '_') !== 0 && $value !== (isset($nullable[$name]) ? "\0" : null)) {
+            if ((strpos($name, '_') !== 0 || isset($custom_properties[$name]))
+                && $value !== (isset($nullable[$name]) ? "\0" : null)) {
                 // Set the value. But where? If this is a custom property name,
                 // translate it to the field system name. (We are assuming that
                 // no property named after the field system name is ever set in
