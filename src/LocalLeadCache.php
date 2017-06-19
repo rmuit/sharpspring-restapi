@@ -630,6 +630,7 @@ class LocalLeadCache
                 $leads = array_values($leads);
                 foreach ($e->getData() as $i => $object_result) {
                     if (!empty($object_result['success'])) {
+                        $leads[$i]->id = $object_result['id'];
                         $this->cacheLead($this->sharpSpringConnection->toArray('lead', $leads[$i]));
                     }
                 }
