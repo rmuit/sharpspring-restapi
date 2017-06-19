@@ -86,8 +86,13 @@ class LocalLeadCache
     /**
      * Sharpspring IDs, indexed by e-mail address. (Reverse lookup cache #1.)
      *
-     * The values are very often single-value arrays (numerically indexed), but
-     * can theoretically be multi-value.
+     * The keys are e-mail addresses, always in lower case. (Sharpspring may
+     * have an e-mail address stored with uppercase letters; its lookup through
+     * e.g. getLeads() is case insensitive and creating multiple e-mail
+     * addresses differing case yields error 301 "Entry already exists", as it
+     * should.) Values are single-value arrays (numerically indexed). They can
+     * theoretically be multi-value but that doesn't happen in practice because
+     * Sharpspring properly prevents that.
      *
      * @var array
      */
@@ -382,6 +387,7 @@ class LocalLeadCache
      */
     public function getLeadsByEmail($email, $check_remotely = true)
     {
+        $email = strtolower($email);
         $ids = !empty($this->sharpspringIdsByEmail[$email]) ? $this->sharpspringIdsByEmail[$email] : [];
 
         $leads = [];
@@ -880,9 +886,10 @@ class LocalLeadCache
             }
         }
 
-        // Update reverse lookup cache for the e-mail address in the same way.
+        // Update reverse lookup cache for the e-mail address in the same way,
+        // except always store it lowercase.
         $value_was_changed = $lead_exists;
-        $email = $lead_array['emailAddress'];
+        $email = strtolower($lead_array['emailAddress']);
         if (empty($this->sharpspringIdsByEmail[$email])) {
             $this->sharpspringIdsByEmail[$email] = [$lead_array['id']];
         } elseif ($lead_exists) {
@@ -902,6 +909,7 @@ class LocalLeadCache
         if ($value_was_changed) {
             $previous_value = $this->getPropertyValue('emailAddress', $lead_array['id'], false);
             if ($previous_value) {
+                $previous_value = strtolower($previous_value);
                 // We 'know' there can only be one e-mail so we might as well
                 // unset the value / assign empty array to it. But out of
                 // principle, we filter().
@@ -938,12 +946,13 @@ class LocalLeadCache
     protected function uncacheLead(array $where)
     {
         if (isset($where['emailAddress'])) {
-            if (empty($this->sharpspringIdsByEmail[$where['emailAddress']])) {
+            $email = strtolower($where['emailAddress']);
+            if (empty($this->sharpspringIdsByEmail[$email])) {
                 $ids = [];
             } else {
-                $ids = $this->sharpspringIdsByEmail[$where['emailAddress']];
+                $ids = $this->sharpspringIdsByEmail[$email];
                 // Already unset the reverse lookup cache for e-mail.
-                $this->sharpspringIdsByEmail[$where['emailAddress']] = [];
+                $this->sharpspringIdsByEmail[$email] = [];
             }
         } else {
             // No further checks on $where; this is a protected function.
@@ -961,6 +970,7 @@ class LocalLeadCache
             if (!isset($where['emailAddress'])) {
                 $email = $this->getPropertyValue('emailAddress', $id, false);
                 if ($email) {
+                    $email = strtolower($email);
                     // This should really be a one-element array but we still
                     // filter like it might not be. This code dovetails with
                     // updateMemoryCaches().
