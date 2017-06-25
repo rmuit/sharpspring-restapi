@@ -14,6 +14,12 @@ use SharpSpring\RestApi\CurlClient;
  * Code doing anything in a source system is missing, so this is an abstract
  * class which should have at least its getFieldToUpdate() and doUpdateAction()
  * extended (or its whole processItem() redone).
+ *
+ * @todo if someone has a heavily used system, they should test whether any
+ *   call to the getRemovedListMembers API method is capped at a certain amount,
+ *   like getLeads is capped at 500. If so, the code in start() should be
+ *   amended to do repeated API calls with offsets. I lack info on how this
+ *   should work in practice, so far.
  */
 abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
 {
@@ -22,6 +28,18 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
      * - sharpspring_api_secret_key (string)
      * - sharpspring_lead_custom_properties][sourceId (See the sync job.)
      * - list_format
+     *
+     * - start_min_time_fetching (integer; default 10):
+     *   The minimum amount of seconds start() may take fetching items. If the
+     *   time from when start() gets called until items are fetched takes
+     *   shorter than this, start() will return the full data set in one go. If
+     *   not, it may halt execution (and be called again later) for fear of
+     *   timeouts. For more info on why: see the code. This is inexact value:
+     *   start() may run up to this amount of seconds _plus_ however long it
+     *   takes to complete the next API call. Ignored if
+     *   'sharpspring_no_time_constraints' is true.
+     * - sharpspring_no_time_constraints (boolean):
+     *   See just above.
      */
 
     /**
@@ -30,6 +48,19 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
      * @var \SharpSpring\RestApi\Connection
      */
     protected $sharpSpringConnection;
+
+    /**
+     * Constructor function. Sets up the necessary settings.
+     */
+    public function __construct(array $settings = [])
+    {
+        // Settings required by this job to have a value:
+        if (!isset($settings['start_min_time_fetching']) || !is_numeric($settings['start_min_time_fetching'])) {
+            $settings['start_min_time_fetching'] = 10;
+        }
+
+        parent::__construct($settings);
+    }
 
     /**
      * Returns Sharpspring Connection configured for our account.
@@ -52,7 +83,7 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
     /**
      * Determine from a RemovedListMember, which fields we want to update.
      *
-     * This is an example method only; the first array members are complete
+     * This is an example method only; the keys in the return values are total
      * guesses so this method should be extended
      *
      * @param array $removed_list_member
@@ -197,72 +228,65 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
             'skipped_not_queued' => [],
         ];
 
-        // Gather the destination contact IDs that should be disabled, as items.
+        $connection = $this->getSharpSpringConnection();
 
+        // Gather the destination contact IDs that should be disabled, as items.
+        // Take into account that we might have looped back from a previous
+        // call to start(), with 'fetched_items' already in context.
+        $start_time = time();
         $items = isset($context['fetched_items']) ? $context['fetched_items'] : [];
         // This may prevent unneeded memory usage when $items gets changed and
         // will also prevent $context['fetched_items'] from containing unneeded
         // data at the end of fetching:
         $context['fetched_items'] = [];
-
-        $connection = $this->getSharpSpringConnection();
-        // The lists are static (ish), but it probably does not hurt to get them
-        // every time. We need to do per-list calls for the list members anyway.
-        if (!isset($context['sharpspring_active_lists'])) {
-            $context['sharpspring_active_lists'] = $connection->getActiveLists();
+        if (!isset($context['sharpspring_start_api_calls'])) {
+            $context['sharpspring_start_api_calls'] = $this->apiCallsForStart();
         }
-        while ($list = array_shift($context['sharpspring_active_lists'])) {
-            // Given the field values observed/documented in getFieldToUpdate(),
-            // we will assume that removedCount is non-zero if there are *any*
-            // bounces or unsubscribed, so we don't need to check everything.
-//            $removed_types_to_check = empty($list['removedCount']) ? ['unsubscribed', 'hardbounced'] : ['removed', 'unsubscribed', 'hardbounced'];
-            $removed_types_to_check = empty($list['removedCount']) ? [] : ['removed'];
-            foreach ($removed_types_to_check as $removed_type) {
-                $members = $connection->getRemovedListMembers($list['id'], $removed_type);
-                $i = 0;
-                foreach ($members as $member) {
-                    // $member has:
-                    // - a listID, listMemberID, and leadID
-                    // - emailaddress, firstName and lastName
-                    // - isRemoved, isUnsubscribed and hardBounced ("0" or "1")
-                    // We will let processItem() deal with checking whether a
-                    // removed lead still has the same e-mail address (and not
-                    // process it if it doesn't). We collect and deduplicate
-                    // RemovedListMembers from all lists here; that means we
-                    // will dedupe by a combination of leadID + emailaddress.
-                    if (empty($member['leadID']) || empty($member['emailaddress'])) {
-                        $this->log('RemovedListMember object has empty leadID/email: @list_member', ['@list_member' => json_encode($member)], WATCHDOG_ERROR);
-                        // The actual below value is not so important...
-                        $context['error_not_queued'][] = (isset($member['listID']) ? $member['listID'] : '?') . ":$removed_type:" . (isset($member['listMemberID']) ? $member['listMemberID'] : $i);
-                    } else {
-                        $member_key = "$member[listID]:$removed_type:$member[listMemberID]";
-                        $item_key = "$member[leadID]:$member[emailaddress]";
+        while ($args = array_shift($context['sharpspring_start_api_calls'])) {
+            $removed_type = $args[1];
+            $members = $connection->getRemovedListMembers($args[0], $removed_type);
+            $i = 0;
+            foreach ($members as $member) {
+                // $member has:
+                // - a listID, listMemberID, and leadID
+                // - emailaddress, firstName and lastName
+                // - isRemoved, isUnsubscribed and hardBounced ("0" or "1")
+                // We will let processItem() deal with checking whether a
+                // removed lead still has the same e-mail address (and not
+                // process it if it doesn't). We collect and deduplicate
+                // RemovedListMembers from all lists here; that means we will
+                // dedupe by a combination of leadID + emailaddress.
+                if (empty($member['leadID']) || empty($member['emailaddress'])) {
+                    $this->log('RemovedListMember object has empty leadID/email: @list_member', ['@list_member' => json_encode($member)], WATCHDOG_ERROR);
+                    // The actual below value is not so important...
+                    $context['error_not_queued'][] = (isset($member['listID']) ? $member['listID'] : '?') . ":$removed_type:" . (isset($member['listMemberID']) ? $member['listMemberID'] : $i);
+                } else {
+                    $member_key = "$member[listID]:$removed_type:$member[listMemberID]";
+                    $item_key = "$member[leadID]:$member[emailaddress]";
 
-                        $update_priority = $this->getFieldToUpdate($member, true);
-                        if (!$update_priority) {
-                            $this->log('RemovedListMember object @key does not result in an update operation (does the job code need to be changed?): @list_member', ['@key' => $member_key, '@list_member' => json_encode($member)], WATCHDOG_ERROR);
-                            $context['error_not_queued'][] = $member_key;
-                        } elseif (!isset($items[$item_key]) || $update_priority > $items[$item_key]) {
-                            $items[$item_key] = $member;
-                        }
-                        // Duplicate RemovedListMembers are silently discarded.
+                    $update_priority = $this->getFieldToUpdate($member, true);
+                    if (!$update_priority) {
+                        $this->log('RemovedListMember object @key does not result in an update operation (does the job code need to be changed?): @list_member', ['@key' => $member_key, '@list_member' => json_encode($member)], WATCHDOG_ERROR);
+                        $context['error_not_queued'][] = $member_key;
+                    } elseif (!isset($items[$item_key]) || $update_priority > $items[$item_key]) {
+                        $items[$item_key] = $member;
                     }
-                    $i++;
+                    // Duplicate RemovedListMembers are silently discarded.
                 }
+                $i++;
             }
 
-            // To prevent timeouts: with each consecutive call to start(),
-            // process one list which actually has removed members and indicate
-            // we should loop back here.
-            if ($removed_types_to_check && empty($this->settings['list_format'])) {
-                $context['drunkins_process_more'] = !empty($context['sharpspring_active_lists']);
-                if ($context['drunkins_process_more']) {
-                    // Since we may change existing items, keep them in context
-                    // and return them all at the end.
-                    $context['fetched_items'] = $items;
-                    $items = [];
-                    break;
-                }
+            // If we need to make more calls, check if we are not running too
+            // long already, to prevent timeouts.
+            if (!empty($context['sharpspring_start_api_calls'])
+                && empty($this->settings['sharpspring_no_time_constraints'])
+                && time() - $start_time > $this->settings['start_min_time_fetching']) {
+                $context['drunkins_process_more'] = TRUE;
+                // Since we may change existing items later, keep them in
+                // context and return them all at the end.
+                $context['fetched_items'] = $items;
+                $items = [];
+                break;
             }
         }
 
@@ -289,7 +313,7 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
                             if (isset($context['update_cache'][$key][$update_action[0]])
                                 && $context['update_cache'][$key][$update_action[0]] === $update_action[1]
                             ) {
-                                // Sestination item already has this value.
+                                // Destination item already has this value.
                                 $reset = true;
                             }
                         }
@@ -306,6 +330,49 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
         }
 
         return $items;
+    }
+
+
+    /**
+     * Gets a list of API calls to make during start().
+     *
+     * The logic in this function contains assumptions about several API
+     * calls' undocumented return values.
+     *
+     * @return array
+     *   A list of two-element arrays: arguments to getRemovedListMembers API
+     *   calls to make. (List ID and flag.)
+     *
+     * @todo As mentioned above: maybe this should be extended with limit/offset
+     *       (or maybe that should be implemented in another way), eventually.
+     */
+    protected function apiCallsForStart() {
+        // The lists are static (ish), but it probably does not hurt to get them
+        // every time. We need to do per-list calls for the list members anyway.
+        $lists = $this->getSharpSpringConnection()->getActiveLists();
+        $api_calls = [];
+        foreach ($lists as $list) {
+            // Two assumptions / notes:
+            // 1) Given
+            // - the fact that a list has only a 'removedCount' property and not
+            //   e.g. a 'unsubscribedCount' / 'hardbouncedCount',
+            // - the field values (combination of flags) observed in the return
+            //   value of getRemovedListMembers calls,
+            // we assume removedCount is non-zero if there are *any* bounces
+            // or unsubscriptions, so we don't need to check all flags. We check
+            // either only 'removed', or nothing.
+            //
+            // 2) There are cases where 'removedCount' is zero but still
+            // getRemovedListMembers(ID, 'removed') returns ListMembers. So far
+            // we're assuming that these are 'old' members (for whatever
+            // undocumented definition of "old") which would have been reset
+            // already - so we won't care about them.
+            if (!empty($list['removedCount'])) {
+                $api_calls[] = [$list['id'], 'removed'];
+            }
+        }
+
+        return $api_calls;
     }
 
     /**
