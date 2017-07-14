@@ -305,12 +305,15 @@ class LocalLeadCache
             // integer values. (Because that's how the REST API returns JSON. We
             // don't want to depend on this staying this way forever, though.)
             // We also can't do non-strict comparison because we want to see
-            // differences between '' and 0.
+            // differences between '' and 0. We compare e-mail case
+            // insensitively like Sharpspring does.
             $diff = ['id' => $sharpspring_lead['id']];
             foreach ($external_lead as $key => $value) {
                 $external_value_set = isset($value) && $value !== '';
                 $sharpspring_value_set = isset($sharpspring_lead[$key]) && $sharpspring_lead[$key] !== '';
-                if ($sharpspring_value_set !== $external_value_set || (string)$sharpspring_lead[$key] !== (string)$value) {
+                if ($sharpspring_value_set !== $external_value_set
+                    || ($key === 'emailAddress' ? strtolower($sharpspring_lead[$key]) !== strtolower($value)
+                        : (string)$sharpspring_lead[$key] !== (string)$value)) {
                     $diff[$key] = isset($sharpspring_lead[$key]) ? $sharpspring_lead[$key] : null;
                 }
             }
