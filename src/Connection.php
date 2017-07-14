@@ -824,10 +824,12 @@ class Connection
      * BEHAVIOR WARNINGS: (tested on API v1.117, 20161205):
      *
      * - If a provided Lead has an existing id and an emailAddress that already
-     *   exists in a different lead, nothing will be updated even though the API
-     *   call will return success!
+     *   exists in a different lead, then ONLY the updateTimeStamp will be
+     *   updated and the API call will return success, but NONE of the other
+     *   fields will be changed.
      * - If a provided Lead has a nonexistent id (regardless whether the
-     *   emailAddress exists): same.
+     *   emailAddress exists) nothing will be updated even though the API call
+     *   will return success!
      * - If a provided Lead has no id and no emailAddress: same.
      * - If a provided Lead has no id and an emailAddress that does not yet
      *   exist: same.

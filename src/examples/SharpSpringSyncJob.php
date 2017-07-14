@@ -213,7 +213,8 @@ class SharpSpringSyncJob extends DrunkinsJob
     /**
      * A quick place to store logs because I didn't want to duplicate commands.
      *
-     * (This class givew no clue what these are used for, but subclasses can.)
+     * (This class gives no clue what these are used for, but subclasses can do
+     * things like send an e-mail report containing them.)
      */
     protected $temporaryLogs;
 
@@ -519,6 +520,8 @@ class SharpSpringSyncJob extends DrunkinsJob
             // subset of 'sent'/'error': only the above categories add up to
             // the total items processed; this category is not part of it.
             'remove' => [],
+            // Separate: mapping of SS id => e-mail for update calls made
+            'updates_emails' => [],
         ];
 
         // Preprocess the deduped items. We'll go through all items and check if
@@ -538,9 +541,9 @@ class SharpSpringSyncJob extends DrunkinsJob
         // Descriptions of edge cases we've thought of so far:
         // 1)
         // The source system turns off Sharpspring-sync for one contact and
-        // turns it on for another with the same e-mail address, the same time:
-        // the former should be canceled (and the latter will just get seen as
-        // an update, that happens to change the source-foreign-key too).
+        // turns it on for another with the same e-mail address at the same
+        // time: the former should be canceled (and the latter will just get
+        // seen as an update that happens to change the source-foreign-key too).
         // 2)
         // If one source item changes e-mail address and another one creates a
         // new record with the old e-mail address, we should treat it as such.
@@ -557,6 +560,14 @@ class SharpSpringSyncJob extends DrunkinsJob
         // cancel rename #2. (This happens to be more straightforward than
         // always canceling #2; see below.)
         // 4)
+        // E-mail change while there is another record in Sharpspring with the
+        // same e-mail address (which has no(nexistent) source ID; otherwise it
+        // would be caught by the below): the update will fail but Sharpspring
+        // will report success (see the Connection::updateLead comments). We
+        // should cancel the update _except_ if the lead is going to be
+        // deactivated, in which case it's better to just deactivate it without
+        // changing e-mail and without flagging a clash.
+        // 5)
         // If there are two contacts with the same e-mail address in the source
         // system which are synced to Sharpspring, the Lead in Sharpspring will
         // likely 'flip-flop':
@@ -685,6 +696,17 @@ class SharpSpringSyncJob extends DrunkinsJob
                     // Deactivate. (Also if this has code 2 because no e-mail;
                     // then we have an ID, so deactivating is possible.)
                     $lead_action_code = $this->actionCode['deactivate'];
+                    // Check for edge case 4 part 1: the e-mail changes at the
+                    // same time but that e-mail already exists in Sharpspring?
+                    if (array_key_exists('emailAddress', $compare) && $leads_cache->getLeadsByEmail($lead->emailAddress, false)) {
+                        // The deactivate-and-change would fail silently, so
+                        // only deactivate. Log, but don't warn the user. This
+                        // will likely be the last time we update the record
+                        // anyway (since it's inactive in the source system).
+                        unset($lead->emailAddress);
+                        $this->log('Source record @c1 is being deactivated and changing e-mail address, and starts at address @e1. The new e-mail address already exists in Sharpspring (on a lead with a different source id). We will process the deactivation without changing e-mail.',
+                            ['@c1' => $this->getLeadDescription($lead), '@e1' => $compare['emailAddress']], WATCHDOG_NOTICE);
+                    }
                 }
                 if (!$lead_action_code) {
                     // The active, non-error lead has a 'linked' lead in
@@ -699,6 +721,12 @@ class SharpSpringSyncJob extends DrunkinsJob
                     // already know that exists.)
                     elseif (array_key_exists('emailAddress', $compare)) {
                         $lead_action_code = $this->actionCode['update_email'];
+                        // Check for edge case 4 part 2: another lead with same
+                        // e-mail.
+                        if ($leads_cache->getLeadsByEmail($lead->emailAddress, false)) {
+                            $this->logAndStore('Source record @c1 is changing e-mail address and starts at address @e1. The new e-mail address already exists in Sharpspring (on a lead with a different source id). This update is skipped and the leads should be reconciled manually',
+                                ['@c1' => $this->getLeadDescription($lead), '@e1' => $compare['emailAddress']], WATCHDOG_WARNING);
+                        }
                     }
                     // If {$field_source_id} key is set in $compare, we know the
                     // field exists in $lead AND it is not equal. If the field
@@ -1023,8 +1051,9 @@ class SharpSpringSyncJob extends DrunkinsJob
             // It sucks, but we can't trust our updates; they may have failed
             // (but returned a success code) if the e-mail address changed and
             // there's another record with the same e-mail address in the db. So
-            // we need to doublecheck that the lead is actually in Sharpspring.
-            // We'll do it in finish() getting all updated items with one query.
+            // we need to doublecheck that the lead is actually in Sharpspring
+            // and that the e-mail address is actually updated. We'll do it in
+            // finish() getting all updated items with one query.
 
             // Do accounting of successful updated/created items.
             foreach ($item as $i => $lead) {
@@ -1036,10 +1065,14 @@ class SharpSpringSyncJob extends DrunkinsJob
                 $ss_id = !empty($lead->id) ? $lead->id : (!empty($result[$i]['id']) ? $result[$i]['id'] : '');
                 $src_id = !empty($lead->sourceId) ? $lead->sourceId : $ss_id;
                 if (empty($ss_id)) {
-                    // This should never happen.
+                    // This should never happen. We won't bother with the
+                    // e-mail doublecheck here.
                     $context['sent'][] = $src_id;
                 } else {
                     $context['sent'][$ss_id] = $src_id;
+                    if (!$create_new) {
+                        $context['updates_emails'][$ss_id] = $lead->emailAddress;
+                    }
                 }
             }
         } catch (SharpSpringRestApiException $e) {
@@ -1063,6 +1096,7 @@ class SharpSpringSyncJob extends DrunkinsJob
                             $context['sent'][] = $src_id;
                         } else {
                             $context['sent'][$ss_id] = $src_id;
+                            $context['updates_emails'][$ss_id] = $item[$i]->emailAddress;
                         }
                     } catch (SharpSpringRestApiException $e) {
                         $compare = false;
@@ -1199,6 +1233,29 @@ class SharpSpringSyncJob extends DrunkinsJob
                 // more precise, since we're only interested in updates (for
                 // which we have them).
                 foreach ($leads as $lead) {
+                    if (isset($context['updates_emails'][$lead['id']])
+                        && $context['updates_emails'][$lead['id']] !== $lead['emailAddress']) {
+                        // We've been hit by the updateLeads bug that does not
+                        // actually update things. Convert lead to object just
+                        // for logging - it is strange but oh well...
+                        $lead_obj = new LeadWithSourceId($lead);
+                        if ($sharpspring instanceof LocalLeadCache) {
+                            $this->logAndStore("Lead @id/@lead has e-mail address @email in the source system, but could not be updated in Sharpspring, probably because another lead with the same e-mail exists. This might get fixed on the next process run; if it does not, it will need manual action.",
+                                ['@id' => $lead['id'], '@lead' => $this->getLeadDescription($lead_obj), '@email' => $context['updates_emails'][$lead['id']]], WATCHDOG_ERROR);
+                            // Apparently the lead with the target e-mail is not
+                            // in our cache (and apparently that is because it's
+                            // disabled), so get this lead in our cache and see
+                            // if the comparison in start() will yield different
+                            // results next time.
+                            $sharpspring->getLeadsByEmail($context['updates_emails'][$lead['id']]);
+                        } else {
+                            // We'll log a more detailed message for this but
+                            // in the end we don't know how to fix this
+                            // automatically so fall through to the below.
+                            $this->logAndStore("Lead @id/@lead has e-mail address @email in the source system, but could not be updated in Sharpspring, probably because another lead with the same e-mail exists (which is probably disabled and therefore invisible in Sharpspring). This will need manual action (or reconfiguration of the job).",
+                                ['@id' => $lead['id'], '@lead' => $this->getLeadDescription($lead_obj), '@email' => $context['updates_emails'][$lead['id']]], WATCHDOG_ERROR);
+                        }
+                    }
                     unset($sent_ss_ids[$lead['id']]);
                 }
                 // Any keys now left in $sent_ss_ids have apparently not been

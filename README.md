@@ -193,9 +193,9 @@ such arrays. Opinions/PRs welcome.
 ## API Bugs
 
 Most strange behavior of the Sharpspring REST API has been documented or partly
-mitigated/hidden by this library. However if you are going to do serious work
-based on the API, there are a couple of things you should at least be aware of,
-and decide whether you need to take these into account.
+mitigated/hidden away by this library. However if you are going to do serious
+work based on the API, there are a couple of things you should at least be aware
+of, and decide whether you need to take these into account.
 
 1) Values with non-standard characters (roughly: characters that would be encoded
 by htmlspecialchars()) are stored in Sharpspring differently depending on
@@ -215,7 +215,8 @@ address. However if the changed e-mail happens to be used in another existing
 lead already, the API will silently discard the update _but still report
 success_. This is a potential issue if you are mirroring an existing contact
 database where e-mail addresses are not necessarily unique, into Sharpspring.
-You will need to doublecheck your updates to see whether they succeeded.
+You will need to doublecheck your updates to see whether they succeeded. (One
+example of such code is in SharpspringSyncJob::finish().)
 
 ## Completeness
 
