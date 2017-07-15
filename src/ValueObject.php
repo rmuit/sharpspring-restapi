@@ -33,6 +33,31 @@ namespace SharpSpring\RestApi;
 class ValueObject
 {
     /**
+     * Here's some 'data type' related issue(s) that we might care about
+     * (only one, so far):
+     *
+     * - Sharpspring won't accept empty strings as values in integer ID columns,
+     *   which is annoying because Sharpspring itself returns empty values for
+     *   these fields in their JSON notation as empty strings. So we will need
+     *   to accept empty strings in these properties, and do conversion of
+     *   Sharpspring's own return values to make them valid; only for integers
+     *   (so far?). Note that sending numeric strings does not seem to generate
+     *   errors; only empty strings do.
+     *
+     * So any non-char/text/string value that could be empty in Sharpspring,
+     * probably needs to be registered. (These are non-required int / bigint /
+     * tinyint fields. Not sure yet if smallint/double/timestamp fields exists
+     * that are non-required; not sure yet if date fields have the same issue.)
+     */
+    // protected $_schemaTypes = [];
+    // NOPE. We won't do this yet. Reason: we have a 'nullable' property for
+    // other reasons (see below), and as long as none of our nullable properties
+    // are non-string fields... (in other words: as long as we don't see a field
+    // which we should be able to update to both '' and null...) AND as long as
+    // all our non-string fields which would cause errors, are actually nullable
+    // ...we can use $_nullableProperties to prevent sending empty strings.
+
+    /**
      * All property names in the object that are nullable.
      *
      * Most defined properties in a new object start out as unset === null. We
@@ -160,20 +185,26 @@ class ValueObject
         $array = [];
         $custom_properties += $this->_customProperties;
 
-        // All defined properties should be set in the array except null
-        // properties (because otherwise the REST service will return "invalid
-        // value" errors). The exception to these are 'nullable' properties; in
-        // their case the 'skip' value is "\0".
+        // All defined properties should be set in the returned array except
+        // - our class variables that are defined above (obviously); we will
+        //   skip any properties starting with '_' unless they are defined in
+        //   custom properties;
+        // - null properties (because the REST service will often return
+        //   "invalid parameters" errors for null values), except for properties
+        //   marked as nullable (in which case we will skip value "\0");
+        // - nullable properties with value ''. (This is not because they are
+        //   nullable, but because they are assumed to be non-string values and
+        //   the REST API will return "invalid parameters" errors for those;
+        //   see comments near the class variables.)
         $nullable = array_flip($this->_nullableProperties);
         foreach ($this as $name => $value) {
             if ((strpos($name, '_') !== 0 || isset($custom_properties[$name]))
-                && $value !== (isset($nullable[$name]) ? "\0" : null)) {
-                // Set the value. But where? If this is a custom property name,
-                // translate it to the field system name. (We are assuming that
-                // no property named after the field system name is ever set in
-                // the object, and that no duplicate properties are mapped to
-                // the same field system name. If that happens, values can get
-                // lost in the array.)
+                && (isset($nullable[$name]) ? $value !== "\0" && $value !== '' : $value !==  null)) {
+                // Set the value. If this is a custom property name, set it in
+                // the field system name. (We are assuming that no property
+                // named after the field system name is ever set in the object,
+                // and that no duplicate properties are mapped to the same field
+                // system name. If that happens, values can get lost.)
                 if (isset($custom_properties[$name])) {
                     $name = $custom_properties[$name];
                 }

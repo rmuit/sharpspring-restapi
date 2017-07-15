@@ -144,7 +144,8 @@ class Connection
      *
      * The difference with the toArray() method on the object itself is that
      * this method additionally maps custom properties that are set on this
-     * Connection instance. Also, this accepts arrays as input.
+     * Connection instance. Also, this accepts arrays as input (which, in
+     * contrast to objects, do not filter out 'internal' properties.)
      *
      * @param string $object_type
      *   Type of object to set mapping for: 'lead', 'opportunity', 'account'.
