@@ -78,7 +78,7 @@ class ValueObject
      *
      * Beware that all code in this library makes the following implicit
      * assumptions, which you are expected to follow:
-     * - No two property names are mapped to the sane custom field system name.
+     * - No two property names are mapped to the same custom field system name.
      * - No property name ever doubles as a field system name, or vice versa; in
      *   other words, the two 'namespaces' of properties and custom field names
      *   never overlap. This should be easy enough to adhere to, since field
@@ -91,9 +91,10 @@ class ValueObject
      * Constructs an object, converting custom field system names to properties.
      *
      * @param array $values
-     *   Values to initialize in the object. We assume custom field values are
-     *   set with a Sharpspring 'field system name' key; the corresponding
-     *   property will be set to this value.
+     *   Values to initialize in the object. Custom fields can be provided with
+     *   a Sharpspring 'field system name' key; the corresponding property will
+     *   be set in this object. Fields/properties starting with an underscore
+     *   will be ignored.
      * @param array $custom_properties
      *   The custom property name to Sharpspring field system name mapping,
      *   which should be used in this object (and remembered for toArray()
@@ -102,8 +103,8 @@ class ValueObject
      */
     public function __construct(array $values = [], array $custom_properties = [])
     {
-        // Inject the properties in this object. Keep any unspecified properties
-        // that are in the class definition.
+        // Inject the properties in this object. Keep any properties that are in
+        // the class definition, and are not overridden.
         $this->_customProperties = $custom_properties + $this->_customProperties;
 
         // Initialize nullable properties first; they can be overwritten by
@@ -112,8 +113,8 @@ class ValueObject
             $this->$name = "\0";
         }
 
-        // Set property values, assuming values are keyed by system name.
-        // (Custom property names will also work, however.) We blindly assume no
+        // Set property values, assuming values are keyed by system name (but
+        // values keyed by property names will also work). We blindly assume no
         // duplicate properties are mapped to the same field system name. If so,
         // it is unclear which property will be set.
         $custom_fields = array_flip($this->_customProperties);
@@ -121,7 +122,18 @@ class ValueObject
             if (isset($custom_fields[$name])) {
                 $name = $custom_fields[$name];
             }
-            $this->$name = $value;
+            // Silently skip property names that start with an underscore, to
+            // prevent obscure bugs that happen when internal class properties
+            // are overwritten. (This is not symmetric with toArray() which can
+            // read properties starting with an underscore if explicitly told
+            // to. There are valid use cases for setting properties like these,
+            // e.g. keeping info that is only used by the application and not
+            // passed to the REST API, or including values in the toArray()
+            // return value only if a custom mapping is provided; these
+            // properties just cannot be set through the constructor.)
+            if (strpos($name, '_') !== 0) {
+                $this->$name = $value;
+            }
         }
     }
 
