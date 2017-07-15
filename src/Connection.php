@@ -27,17 +27,18 @@ use Psr\Log\LoggerInterface;
  * to be changed.
  *
  * Create/update methods (for leads only, so far) make use of our ValueObject
- * structures, but don't enforce using them: they accept Lead objects as well as
- * arrays.
+ * structures (and unfortunately rely on schema information contained in them,
+ * to fix bogus API return values). But callers are not forced to use these
+ * ValueObjects: the calls also accept arrays as input.
  *
  * Create/update/delete methods which handle multiple leads will throw a
  * SharpSpringRestApiException if at least one of the objects returns failure.
  * The caller is then responsible for checking which objects succeeded/failed,
  * from the exception's getData() return value.
  *
- * This class does handle the connection/authentication details of making the
- * actual REST call; this responsibility is delegated to a 'client' object that
- * must be injected in the constructor, so that details around networking /
+ * This class does not handle the connection/authentication details of making
+ * the actual REST call; this responsibility is delegated to a 'client' object
+ * that must be injected in the constructor, so that details around networking /
  * credentials can be handled completely separately from this class' logic.
  */
 class Connection
@@ -115,22 +116,17 @@ class Connection
      *   account)
      * - or you use ValueObject classes as input, with custom properties that do
      *   not correspond to the field system names - and those ValueObject
-     *   classes do not set a property to custom field system name themselves.
+     *   classes do not have a property to custom field system name mapping for
+     *   themselves.
      * Any input array/object will have the properties in this mapping converted
      * before they are used in any REST API calls.
-     *
-     * (This class, in its function documentation, implicitly assumes that it
-     * does not need to care whether the input arrays'/objects' field names are
-     * already field system names. This is true in practice because the system
-     * names always end in an underscore + 13 char semi random hex string. So as
-     * long as you don't define your own custom properties like that, you should
-     * be safe.)
      *
      * @param string $object_type
      *   The type of object to set mapping for: 'lead', 'opportunity', 'account'
      * @param array $mapping
      *   The mapping from our custom property names (array keys) to Sharpspring
-     *   custom field system names (array values).
+     *   custom field system names (array values). The mapping is assumed to
+     *   adhere to some basic rules: see ValueObject::$_customProperties.
      *
      * @see ValueObject::$_customProperties
      */
@@ -140,69 +136,140 @@ class Connection
     }
 
     /**
-     * Converts an external object/array to/from an array used by the REST API.
+     * Converts an external object/array to something accepted by the REST API.
      *
-     * The difference with the toArray() method on the object itself is that
-     * this method additionally maps custom properties that are set on this
-     * Connection instance. Also, this accepts arrays as input (which, in
-     * contrast to objects, do not filter out 'internal' properties.)
+     * This is automatically done by create/update calls so calling this method
+     * explicitly from outside the library should not be needed.
+     *
+     * (When passing a ValueObject,) the difference with the toArray() method on
+     * the object itself is that this method additionally maps custom properties
+     * that are set on this Connection instance.
+     *
+     * Also, this accepts arrays as input; the differences with objects are:
+     * - 'internal' properties are not filtered out (because arrays don't have
+     *   these);
+     * - null values are not filtered out (because arrays can have properties
+     *   removed, so if a value should not be sent then it's expected to not be
+     *   in the array).
+     * The other 'fix' (i.e. removing empty string values in nullable fields;
+     * see comments in ValueObject) is done for arrays too. Because faulty
+     * values which the API returns but would reject as input, should still be
+     * fixed here; $con->updateLead($con->getLead(ID)) should not throw
+     * exceptions; that would put an unreasonable burden on callers that want to
+     * e.g. quickly fix values.
+     *
+     * No 'double fixing' is done, i.e. toArray(INPUT) returns the same as
+     * toArray(toArray(INPUT)). This is a necessary feature because this class,
+     * in its function documentation, implicitly assumes that it does not need
+     * to care whether the input arrays'/objects' field names are already field
+     * system names. (This is true in practice when property to system name
+     * mappings adhere to some basic rules; see ValueObject::$_customProperties)
      *
      * @param string $object_type
      *   Type of object to set mapping for: 'lead', 'opportunity', 'account'.
      * @param \SharpSpring\RestApi\ValueObject|array $object
      *   An input object/array.
      * @param bool $reverse
-     *   If true, convert from (rather than to) system names; output an array
-     *   that has custom property names as keys, using the custom property
-     *   mapping set on this Connection instance. In this case, the input must
-     *   be an array, and should likely be a literal REST API result.
+     *   DEPRECATED. Rather than passing TRUE here, call convertSystemNames().
      *
      * @return array
-     *   By default: an array representing a Sharpspring 'object', that can be
-     *   used in e.g. a create/update REST API call. If the input is an array,
-     *   the output will be the same except any custom property names are
-     *   converted to field system names, according to the custom property
-     *   mapping set on this Connection instance. If $reverse is true, then an
-     *   array with custom properties, that can be used by e.g. custom code
-     *   that cannot work with arbitrary system names, or to construct value
-     *   objects that don't have their own custom property mapping.
+     *   An array representing a Sharpspring 'object', that can be used in e.g.
+     *   a create/update REST API call. If the input argument is an array, this
+     *   return value will be the same except the custom properties/fields are
+     *   converted to their field system names, according to the custom property
+     *   mapping set on this Connection instance - plus some inconsistent
+     *   'empty' values (which the REST API outputs but does not accept) may be
+     *   fixed.
      */
     public function toArray($object_type, $object, $reverse = FALSE)
     {
-        $custom_properties = isset($this->customPropertiesByType[$object_type]) ? $this->customPropertiesByType['lead'] : [];
-        if (is_object($object) && method_exists($object, 'toArray')) {
+        // Regression since v1.0: don't accept objects without toArray() method.
+        // (Noone cares.)
+        if (!is_array($object)) {
+            if (!is_object($object) || !method_exists($object, 'toArray')) {
+                throw new \InvalidArgumentException("Invalid input 'object'.", 99);
+            }
             if ($reverse) {
-                // ValueObjects don't support this; they always convert _from_
-                // properties, by definition.
                 throw new \InvalidArgumentException("The input 'object' must be an array.", 99);
             }
-            return $object->toArray($custom_properties);
         }
 
         if ($reverse) {
-          // We blindly assume no duplicate properties are mapped to the same
-          // field system name.
-          $custom_properties = array_flip($custom_properties);
+            // After a very short lived time, unfortunately after v1.0 came out,
+            // I decided '$reverse' would raise too many questions about
+            // behavior, so that was deprecated but we still support it.
+            return $this->convertSystemNames($object_type, $object);
         }
 
-        // Basically a simpler version of ValueObject::toArray(). This can
-        // handle any object as long as it's an iterable and (unlike a
-        // ValueObject) the iterator yields only field names/values.
-        $array = [];
-        foreach ($object as $name => $value) {
-            // Set the value. But where? If this is a custom property name,
-            // translate it to the field system name. (We are assuming that no
-            // property named after the field system name is ever set in the
-            // object, and that no duplicate properties are mapped to the same
-            // field system name. If that happens, values can get lost in the
-            // array.)
-            if (isset($custom_properties[$name])) {
-                $name = $custom_properties[$name];
+        $custom_properties = isset($this->customPropertiesByType[$object_type]) ? $this->customPropertiesByType[$object_type] : [];
+        if (is_object($object) && method_exists($object, 'toArray')) {
+            return $object->toArray($custom_properties);
+        }
+
+        // Assumption: the number of custom fields is considerably lower than
+        // the number of fields that don't need converting; often 0. So rather
+        // than loop through object values and build a second one with changed
+        // values, we change the properties in place. Blindly assume:
+        // - object-type to class mapping is simple and getSchemaInfo is static;
+        // - $_nullableProperties does not get overridden in custom classes so
+        //   the base class' getSchemaInfo() will return the right data;
+        // - no duplicate properties are mapped to the same field system name.
+        $class = '\\SharpSpring\\RestApi\\' . ucfirst($object_type);
+        if (is_callable([$class, 'getSchemaInfo'])) {
+            $nullable_properties = $class::getSchemaInfo('nullable');
+            if (!empty($nullable_properties) && is_array($nullable_properties)) {
+                // Fix 'empty string on nullable property is not accepted'.
+                foreach ($nullable_properties as $property_name) {
+                    if (isset($object[$property_name]) && $object[$property_name] === '') {
+                        unset($object[$property_name]);
+                    }
+                }
             }
-            $array[$name] = $value;
+        }
+        foreach ($custom_properties as $field_system_name => $property_name) {
+            if (isset($object[$property_name])) {
+                $object[$field_system_name] = $object[$property_name];
+                unset($object[$property_name]);
+            }
         }
 
-        return $array;
+        return $object;
+    }
+
+    /**
+     * Converts field system names into custom property names.
+     *
+     * This method is not used by other library functions; a caller can use it
+     * on an array returned from the REST API, to convert to an array containing
+     * known properties as per the mapping set in setCustomProperties(). This
+     * way, the caller can call setCustomProperties() once and then does not
+     * need to remember this mapping elsewhere.
+     *
+     * @param string $object_type
+     *   The type of object mapping to use: 'lead', 'opportunity', 'account'.
+     * @param array $api_object
+     *   The array as (assumed to be) returned by the REST API.
+     *
+     * @return array
+     */
+    public function convertSystemNames($object_type, array $api_object)
+    {
+        if (isset($this->customPropertiesByType[$object_type])) {
+            // Assumption: the number of custom fields is considerably lower
+            // than the number of fields that don't need converting; often 0. So
+            // rather than loop through object values and build a second one
+            // with changed values, we change the properties in place. We
+            // blindly assume no duplicate properties are mapped to the same
+            // field system name.
+            foreach ($this->customPropertiesByType[$object_type] as $field_system_name => $property_name) {
+                if (isset($api_object[$field_system_name])) {
+                    $api_object[$property_name] = $api_object[$field_system_name];
+                    unset($api_object[$field_system_name]);
+                }
+            }
+        }
+
+        return $api_object;
     }
 
     /**

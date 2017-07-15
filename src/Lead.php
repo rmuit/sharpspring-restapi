@@ -40,7 +40,7 @@ class Lead extends ValueObject
     // default value 1, whereas the others default to null. (Also, the fact that
     // isUnsubscribed is nullable saves us from having to define another
     // $_schemaTypes property to weed out empty strings for now; see elsewhere.)
-    protected $_nullableProperties = ['accountID', 'ownerID', 'campaignID', 'isUnsubscribed', 'active'];
+    protected static $_nullableProperties = ['accountID', 'ownerID', 'campaignID', 'isUnsubscribed', 'active'];
 
     /**
      * Indicator whether this is an active lead. Must be 0 or 1.

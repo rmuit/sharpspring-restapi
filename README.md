@@ -179,7 +179,7 @@ $lead = new ShoeStoreLead($lead_array, $my_properties); // $my_properties may or
 
 // 2) if you have stored the custom properties in the Connection object, you can
 //    use a helper function to first convert the array keys:
-$general_lead_array = $api->toArray('lead', $lead_array, TRUE);
+$general_lead_array = $api->convertSystemNames('lead', $lead_array);
 // This returns ['emailAddress' => 'rm@wyz.biz', 'shoeSize' => 12, ...] and
 // can now be fed into the object that does not need to know its own field
 // mapping:

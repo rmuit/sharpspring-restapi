@@ -73,7 +73,7 @@ class ValueObject
      *
      * @var array
      */
-    protected $_nullableProperties = [];
+    protected static $_nullableProperties = [];
 
     /**
      * All custom property names used by a subclass. (Not required to be set.)
@@ -134,7 +134,7 @@ class ValueObject
 
         // Initialize nullable properties first; they can be overwritten by
         // null values if these are provided in $values.
-        foreach ($this->_nullableProperties as $name) {
+        foreach (static::$_nullableProperties as $name) {
             $this->$name = "\0";
         }
 
@@ -196,7 +196,7 @@ class ValueObject
         //   nullable, but because they are assumed to be non-string values and
         //   the REST API will return "invalid parameters" errors for those;
         //   see comments near the class variables.)
-        $nullable = array_flip($this->_nullableProperties);
+        $nullable = array_flip(static::$_nullableProperties);
         foreach ($this as $name => $value) {
             if ((strpos($name, '_') !== 0 || isset($custom_properties[$name]))
                 && (isset($nullable[$name]) ? $value !== "\0" && $value !== '' : $value !==  null)) {
@@ -214,4 +214,44 @@ class ValueObject
 
         return $array;
     }
+
+    /**
+     * Returns schema information for the current object.
+     *
+     * The reason for this method existing and being static is:
+     * - Connection::toArray() needs to have 'schema information' for the basic
+     *   types of objects, to fix values before they are sent to the REST API;
+     *   (see the issues above $_nullableProperties)
+     * - We want to define this schema information in the classes themselves
+     *   (next to the property names), not in Connection.
+     *
+     * The first layer of array keys are (hardcoded) strings representing types
+     * of 'schema information'. This way, the return value is extensible (and no
+     * other static methods need to be introduced) if we need more information
+     * in the future. Only one type is supported so far:
+     * - 'nullable': the value is a (numerically indexed) array of names of the
+     *   properties which are nullable. (This serves two purposes; see comments
+     *   at/near the variable definition.)
+     *
+     * @param string $type
+     *   The schema 'type'. If empty string, all of the schema information is
+     *   returned, keyed by type. So far, only 'nullable' is supported.
+     *
+     * @return array
+     *   The requested schema info. (Either all, or only of a certain type.)
+     *
+     * @throws \InvalidArgumentException
+     *   For unrecognized schema types.
+     */
+    public static function getSchemaInfo($type = '')
+    {
+        $schema = ['nullable' => static::$_nullableProperties];
+
+        if ($type && !isset($schema[$type])) {
+            throw new \InvalidArgumentException("Invalid schema type '$type'.", 99);
+        }
+
+        return $type ? $schema[$type] : $schema;
+    }
+
 }
