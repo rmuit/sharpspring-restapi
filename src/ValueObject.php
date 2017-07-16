@@ -2,6 +2,8 @@
 
 namespace SharpSpring\RestApi;
 
+use InvalidArgumentException;
+
 /**
  * Base class for Sharpspring value objects (Leads, etc).
  *
@@ -250,7 +252,7 @@ class ValueObject
         $schema = ['nullable' => static::$_nullableProperties];
 
         if ($type && !isset($schema[$type])) {
-            throw new \InvalidArgumentException("Invalid schema type '$type'.", 99);
+            throw new InvalidArgumentException("Invalid schema type '$type'.", 99);
         }
 
         return $type ? $schema[$type] : $schema;

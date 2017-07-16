@@ -2,7 +2,9 @@
 
 namespace SharpSpring\RestApi;
 
+use InvalidArgumentException;
 use Psr\Log\LoggerInterface;
+use UnexpectedValueException;
 
 /**
  * Sharpspring REST API Connection object designed to make coders' lives easier.
@@ -187,10 +189,10 @@ class Connection
         // (Noone cares.)
         if (!is_array($object)) {
             if (!is_object($object) || !method_exists($object, 'toArray')) {
-                throw new \InvalidArgumentException("Invalid input 'object'.", 99);
+                throw new InvalidArgumentException("Invalid input 'object'.", 99);
             }
             if ($reverse) {
-                throw new \InvalidArgumentException("The input 'object' must be an array.", 99);
+                throw new InvalidArgumentException("The input 'object' must be an array.", 99);
             }
         }
 
@@ -317,10 +319,10 @@ class Connection
         $return = null;
         $extra = $error_encountered ? ' while evaluating object-level error(s)' : '';
         if (!is_array($result)) {
-            throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the 'result' part of the response is not an array.\nResponse result for $method call: " . json_encode($result), 101);
+            throw new UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the 'result' part of the response is not an array.\nResponse result for $method call: " . json_encode($result), 101);
         }
         if (count($objects) != count($result)) {
-            throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the number of objects provided to the call (" . count($objects) . ") is different from the number of objects returned in the 'result' part of the response (" . count($result) . ").\nResponse result for $method call: " . json_encode($result), 102);
+            throw new UnexpectedValueException("Sharpspring REST API interpreter failure$extra: the number of objects provided to the call (" . count($objects) . ") is different from the number of objects returned in the 'result' part of the response (" . count($result) . ").\nResponse result for $method call: " . json_encode($result), 102);
         }
         $index = 0;
         foreach ($result as $i => $object_result) {
@@ -328,7 +330,7 @@ class Connection
             // clearly document how these indexes work then, to prevent bugs in
             // other code.
             if ($i !== $index) {
-                throw new \UnexpectedValueException("Sharpspring REST API interpreter failure$extra: result object was expected to have index $index; $i was found.\nResponse result for $method call: " . json_encode($result), 103);
+                throw new UnexpectedValueException("Sharpspring REST API interpreter failure$extra: result object was expected to have index $index; $i was found.\nResponse result for $method call: " . json_encode($result), 103);
             }
             if ($validate_individual_objects) {
                 $this->validateObjectResult($object_result);
@@ -447,7 +449,7 @@ class Connection
         }
 
         if (empty($response['error']) && !isset($response['result'])) {
-            throw new \UnexpectedValueException("Sharpspring REST API systemic error: response contains neither error nor result.\nResponse: " . json_encode($response), 3);
+            throw new UnexpectedValueException("Sharpspring REST API systemic error: response contains neither error nor result.\nResponse: " . json_encode($response), 3);
         }
 
         // There are (we hope not more than) two kinds of error structures:
@@ -463,10 +465,10 @@ class Connection
         // one key for this specific method then validate this.
         if (!empty($response_checks['single_result_key'])) {
             if (!is_array($response['result']) || count($response['result']) != 1) {
-                throw new \UnexpectedValueException("Sharpspring REST API failure: response result is not a one-element array.'\nResponse: " . json_encode($response), 4);
+                throw new UnexpectedValueException("Sharpspring REST API failure: response result is not a one-element array.'\nResponse: " . json_encode($response), 4);
             }
             if (!isset($response['result'][$response_checks['single_result_key']])) {
-                throw new \UnexpectedValueException("Sharpspring REST API failure: response result does not contain key $response_checks[single_result_key].\nResponse: " . json_encode($response), 5);
+                throw new UnexpectedValueException("Sharpspring REST API failure: response result does not contain key $response_checks[single_result_key].\nResponse: " . json_encode($response), 5);
             }
         }
         $result = !empty($response_checks['single_result_key']) ? $response['result'][$response_checks['single_result_key']] : $response['result'];
@@ -490,7 +492,7 @@ class Connection
             // Validate the result (structure, and optionally the individual
             // objects inside) and compare with the number of input parameters.
             if (!isset($params['objects']) || !is_array($params['objects'])) {
-                throw new \UnexpectedValueException("Sharpspring REST API interpreter failure while evaluating error: no 'objects' (array) input parameter present for the $method method.\nResponse: " . json_encode($response), 6);
+                throw new UnexpectedValueException("Sharpspring REST API interpreter failure while evaluating error: no 'objects' (array) input parameter present for the $method method.\nResponse: " . json_encode($response), 6);
             }
             // If 'throw_for_individual_object' is set, this can throw a
             // SharpSpringRestApiException with the specific message / code /
@@ -504,16 +506,16 @@ class Connection
                 return !empty($o['error']);
             }));
             if (!is_array($response['error']) || count($response['error']) != $nr_objects_with_error) {
-                throw new \UnexpectedValueException('Sharpspring REST API interpreter failure: number of errors reported (' . count($response['error']) . ") is different from the number of objects reported to have an error ($nr_objects_with_error).\nResponse: " . json_encode($response), 9);
+                throw new UnexpectedValueException('Sharpspring REST API interpreter failure: number of errors reported (' . count($response['error']) . ") is different from the number of objects reported to have an error ($nr_objects_with_error).\nResponse: " . json_encode($response), 9);
             }
             $error_index = 0;
             foreach ($result as $i => $object_result) {
                 if (!empty($object_result['error'])) {
                     if (!isset($response['error'][$error_index])) {
-                        throw new \UnexpectedValueException("Sharpspring REST API interpreter failure: error in result #$i was expected to correspond to error #$error_index but that error index does not exist.\nResponse: " . json_encode($response), 11);
+                        throw new UnexpectedValueException("Sharpspring REST API interpreter failure: error in result #$i was expected to correspond to error #$error_index but that error index does not exist.\nResponse: " . json_encode($response), 11);
                     }
                     if ($response['error'][$error_index] !== $object_result['error']) {
-                        throw new \UnexpectedValueException("Sharpspring REST API interpreter failure: error in result #$i was expected to be equal to error #$error_index.\nResponse: " . json_encode($response), 12);
+                        throw new UnexpectedValueException("Sharpspring REST API interpreter failure: error in result #$i was expected to be equal to error #$error_index.\nResponse: " . json_encode($response), 12);
                     }
                     $error_index++;
                 }
@@ -527,7 +529,7 @@ class Connection
             if (!empty($response_checks['throw_for_individual_object'])) {
                 // We should never have ended up here; earlier validation should
                 // have thrown an exception.
-                throw new \UnexpectedValueException("Sharpspring REST API interpreter failure: error was set but the result contains no object errors.\nResponse: " . json_encode($response), 13);
+                throw new UnexpectedValueException("Sharpspring REST API interpreter failure: error was set but the result contains no object errors.\nResponse: " . json_encode($response), 13);
             }
             // We can only throw one single exception here, so interpreting
             // individual objects does not make sense and is not our
@@ -583,10 +585,10 @@ class Connection
         // - [ 'success' => true, 'error' => null, (more things like 'id'...) ]
         // - [ 'success' => false, 'error' => anything ]
         if (!isset($object_result['success']) || !array_key_exists('error', $object_result)) {
-            throw new \UnexpectedValueException('Sharpspring REST API failure: result that should reflect status of a single object does not contain both error and success keys: ' . json_encode($object_result), 111);
+            throw new UnexpectedValueException('Sharpspring REST API failure: result that should reflect status of a single object does not contain both error and success keys: ' . json_encode($object_result), 111);
         }
         if (empty($object_result['error']) && !isset($object_result['success'])) {
-            throw new \UnexpectedValueException('Sharpspring REST API failure: result that should reflect status of a single object contains neither error nor success: ' . json_encode($object_result), 112);
+            throw new UnexpectedValueException('Sharpspring REST API failure: result that should reflect status of a single object contains neither error nor success: ' . json_encode($object_result), 112);
         }
         if (!empty($object_result['error'])) {
             // An object-level error was returned. We're going to trust the API
@@ -1093,7 +1095,7 @@ class Connection
         // sure why that is useful. We'll just return the lead - but then we
         // need to first validate that we have exactly one.
         if (count($leads) > 1) {
-            throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'lead' value contains more than one object.'\nResponse: " . json_encode($leads), 16);
+            throw new UnexpectedValueException("Sharpspring REST API failure: response result 'lead' value contains more than one object.'\nResponse: " . json_encode($leads), 16);
         }
         if ($leads) {
             $lead = reset($leads);
@@ -1225,7 +1227,7 @@ class Connection
         $result = $this->call('getAccount', $params, ['single_result_key' => 'account']);
         // For some reason getAccount returns an array of exactly one accounts.
         if (count($result) > 1) {
-            throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'account' value contains more than one object.'\nResponse: " . json_encode($result), 16);
+            throw new UnexpectedValueException("Sharpspring REST API failure: response result 'account' value contains more than one object.'\nResponse: " . json_encode($result), 16);
         }
         return reset($result);
     }
@@ -1288,7 +1290,7 @@ class Connection
         $result = $this->call('getCampaign', $params, ['single_result_key' => 'campaign']);
         // For some reason getCampaign returns an array of exactly one accounts.
         if (count($result) > 1) {
-            throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'campaign' value contains more than one object.'\nResponse: " . json_encode($result), 16);
+            throw new UnexpectedValueException("Sharpspring REST API failure: response result 'campaign' value contains more than one object.'\nResponse: " . json_encode($result), 16);
         }
         return reset($result);
     }
@@ -1369,7 +1371,7 @@ class Connection
         // For some reason getDealStage returns an array of exactly one deal
         // stages.
         if (count($result) > 1) {
-            throw new \UnexpectedValueException("Sharpspring REST API failure: response result 'dealStage' value contains more than one object.'\nResponse: " . json_encode($result), 16);
+            throw new UnexpectedValueException("Sharpspring REST API failure: response result 'dealStage' value contains more than one object.'\nResponse: " . json_encode($result), 16);
         }
         return reset($result);
     }
