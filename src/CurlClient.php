@@ -154,10 +154,7 @@ class CurlClient
      */
     public function call($method, array $params)
     {
-        // Details around (checking) the request ID are implemented in this
-        // class because that will hopefully be easier to change/subclass than
-        // if this code were in the connection object.
-        $request_id = session_id();
+        $request_id = $this->getRequestId();
 
         // Curl options that we really need for this particular call/code to
         // work:
@@ -198,6 +195,12 @@ class CurlClient
         if (!isset($response['id'])) {
             throw new UnexpectedValueException("Sharpspring REST API systemic error: no id found in JSON response from Sharpspring API endpoint. This should never happen.\nResponse (possibly double-encoded): " . json_encode($response), 1);
         }
+        // Check if the request ID is the same in the response as in the
+        // request. (Just following instructions from Sharpspring programming
+        // examples. And what do we do if it is not equal? No idea. How could it
+        // ever be not equal in the first place; what was this ever intended
+        // for? No idea. Maybe an earlier implementation of the API was just
+        // that bad, that it would get confused between requests...)
         if ($response['id'] != $request_id) {
             throw new UnexpectedValueException("Sharpspring REST API systemic error: unexpected id value found in JSON response from Sharpspring API endpoint. This should never happen.\nRequest ID: $request_id\nResponse (possibly double-encoded): " . json_encode($response), 2);
         }
@@ -217,6 +220,19 @@ class CurlClient
             'secretKey' => $this->options['secret_key'],
         ];
         return static::SHARPSPRING_BASE_URL . '?' . http_build_query($query);
+    }
+
+    /**
+     * Helper function to get a request ID.
+     *
+     * Split off into a separate extensible method because maybe someone won't
+     * like using the session ID.
+     *
+     * @return string
+     */
+    protected function getRequestId()
+    {
+        return session_id();
     }
 
     /**
