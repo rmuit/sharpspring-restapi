@@ -49,14 +49,17 @@ following ways:
 
 ## Usage
 
-```
+```php
 use SharpSpring\RestApi\Connection;
 use SharpSpring\RestApi\CurlClient;
 
-// Since the actual API call was abstracted into CurlClient, you need to
-// instantiate two classes:
+// One thing this library does not make super easy: starting. Separation of
+// concerns is considered more important, so (since the actual API call was
+// abstracted into CurlClient) creating a new connection takes 2 lines instead
+// of 1:
 $client = new CurlClient(['account_id' => ..., 'secret_key' => ...);
 $api = new Connection($client);
+
 // Get all leads updated after a certain time (notation in UTC).
 $leads = $api->getLeadsDateRange('2017-01-15 10:00:00');
 ```
@@ -68,127 +71,135 @@ ignored by default; it is not expected that they will ever be encountered. If
 you want to have these logged, then pass a PSR-3 compatible logger object as the
 second argument to the Connection constructor.
 
-### Value objects / custom properties
-You don't have to use objects/classes for e.g. sending updates through the REST
-API, but it can help write sane code, especially when you have custom fields.
-The reason for this is documented in [the ValueObject comments](src/ValueObject.php);
-here are some practical examples to complement the description. There are many
-ways to do the same thing and you can choose your preferred approach.
-```
-/**
- * Say you have leads for your shoe store, with a custom field for shoe size
- * which you created through the Sharpspring UI.
- *
- * You can create leads with an array as input:
- */
+### Custom fields
+In Sharpspring REST API 'objects' (arrays), custom fields are referred to by
+their system name, which changes per account. To enable writing more general
+code, the Connection object has a mapping from custom property to field system
+name. When this mapping is set (with your own choice of property names), any
+'objects' parameters in REST API calls will have their custom property names
+translated automatically to the corresponding field system names.
+
+So, Say you have leads for your shoe store, with a custom field for shoe size
+which you created through the Sharpspring UI, whose system name came out as
+shoe_size_384c1e3eacbb3. The following two examples are equivalent:
+```php
 $api->createLead([
     'firstName' => 'Roderik',
     'emailAddress' => 'rm@wyz.biz',
     'shoe_size_384c1e3eacbb3' => 12,
 ]);
 
-/**
- * ...but as you extend your code, you might grow tired of the hardcoded
- * field name assigned by Sharpspring. You could also do this, since
- * createLead() accepts both objects and arrays:
- */
-class ShoeStoreLead extends Lead
-{
-    // Define your own properties:
-    public $shoeSize;
-
-    // Override the parent's (empty) property mapping variable:
-    protected $_customProperties = ['shoeSize' => 'shoe_size_384c1e3eacbb3'];
-}
-
-$lead = new ShoeStoreLead();
-$lead->firstName = 'Roderik';
-$lead->emailAddress = rm@wyz.biz';
-$lead->shoeSize = 12;
-
-$api->createLead($lead);
-
-/**
- * If you have multiple Sharpspring accounts, you can e.g. set
- * $this->_customProperties dynamically in the ShoeStoreLead constructor and use
- * the same code to update both accounts.
- *
- * If you want to create a general shoestore PHP library, you probably want to
- * inject the account specific settings rather than hardcoding them:
- */
-class ShoeStoreLead extends Lead
-{
-    public $shoeSize;
-}
-// The first argument are values for the new object; see below.
-$lead = new ShoeStoreLead([], $my_properties); // see $_customProperties above
-$lead->shoeSize = 12;
-// etc
-$api->createLead($lead);
-
-/**
- * However, maybe this injection of custom properties into every single
- * ShoestoreLead grows tedious. Since the properties stay the same (until you
- * switch login), you can also set them once on a Connection:
- */
-class ShoeStoreLead extends Lead
-{
-    public $shoeSize;
-}
-$api->setCustomProperties('lead', $my_properties);
-
-$lead = new ShoeStoreLead();
-$lead->shoeSize = 12;
-// etc
-$api->createLead($lead);
-
-/**
- * This brings us full circle: if you don't like objects, you can also use
- * arrays with custom keys after setting them on the Connection.
- */
-$api->setCustomProperties('lead', $my_properties);
-
+$api->setCustomProperties('lead', ['shoeSize' => 'shoe_size_384c1e3eacbb3']);
 $api->createLead([
     'firstName' => 'Roderik',
     'emailAddress' => 'rm@wyz.biz',
     'shoeSize' => 12,
 ]);
+
+// Note that system names will still be OK; after setCustomProperties is called,
+// you can still send in [...,'shoe_size_384c1e3eacbb3' => 12, ...]. Just don't
+// set values for _both_ the field name _and_ its property alias, because then
+// the library does not guarantee which of the two will be used.
 ```
-In summary: you can use both arrays and custom objects (where the former could
-give you shorter code, and the latter could give you IDE autocompletion of
-property names), and if you want to use custom property names / 'aliases' for
-Sharpspring's custom field system names, you can set a field mapping in either
-the Connection object or in each ValueObject.
+Automatic conversion is _only_ done for 'objects' in API call parameters.
+Results returned from API calls are not tampered with. If you want to have
+custom field system names in API results converted back to your custom property
+names, you will need to do this explicitly:
+```php
+$api->setCustomProperties('lead', ['shoeSize' => 'shoe_size_384c1e3eacbb3']);
 
-Above is for constructing objects for create/update calls. When retrieving data
-from the REST API, no conversion is done automatically. You get what is in the
-JSON response (i.e. with custom system names), as an array.
+$leads = $api->getLeads(['emailAddress' => 'rm@wyz.biz']);
+$lead = reset($leads);
+$my_lead = $api->convertSystemNames('lead', $lead);
 ```
-$api->setCustomProperties('lead', $my_properties);
 
-$lead_array = $api->getLead(123456);
-// This returns ['emailAddress' => 'rm@wyz.biz', 'shoe_size_384c1e3eacbb3' => 12, ...]
-// i.e. the above setCustomProperties() has no effect on this.
+### Value objects
+Using arrays for API 'object' representation is just fine. But you might prefer
+to use objects/classes for them. (It gives you IDE autocompletion, which also
+minimizes the chance of mis-capitalized property names which the REST API does
+not handle).
 
-// If you want to use Lead objects (to be able to use $lead->shoeSize) then
-// the conversion to 'fixed' property names will need to be done in one of
-// several ways:
-// 1) feed $lead_array into an object that knows about its own custom properties
-//    because they are stored in the object, or they are injected (see above):
-$lead = new ShoeStoreLead($lead_array, $my_properties); // $my_properties may or may not be needed
+The base class is [ValueObject](src/ValueObject.php) and at this moment there
+is a [Lead](src/Lead.php) class which implements all known fields (with comments
+on where Sharpspring's API documentation is outdated).
 
-// 2) if you have stored the custom properties in the Connection object, you can
-//    use a helper function to first convert the array keys:
-$general_lead_array = $api->convertSystemNames('lead', $lead_array);
-// This returns ['emailAddress' => 'rm@wyz.biz', 'shoeSize' => 12, ...] and
-// can now be fed into the object that does not need to know its own field
-// mapping:
-$lead = new ShoeStoreLead($general_lead_array);
+The following example is equal to above:
+```php
+/**
+ * If you have custom fields, you will want to define your own subclass:
+ */
+class ShoeStoreLead extends Lead
+{
+    // Define your own properties:
+    public $shoeSize;
+}
+$api->setCustomProperties('lead', ['shoeSize' => 'shoe_size_384c1e3eacbb3']);
+
+// This is the create call from above. Note createLead() accepts ValueObjects as
+// well as arrays.
+$lead = new ShoeStoreLead();
+$lead->firstName = 'Roderik';
+$lead->emailAddress = rm@wyz.biz';
+$lead->shoeSize = 12;
+$api->createLead($lead);
+
+// And this is the 'get' call which puts the result into a new object:
+$leads = $api->getLeads(['emailAddress' => 'rm@wyz.biz']);
+$lead = reset($leads);
+$my_lead = $api->convertSystemNames('lead', $lead);
+$my_lead_obj = new ShoeStoreLead($my_lead);
 ```
-I have not used this conversion of data _from_ the API endpoint into
-ValueObjects / arrays with 'non system' keys myself, yet. There may be a case
-for extending getLead(s), getAccount(s) et al, with an option that returns
-such arrays. Opinions/PRs welcome.
+Obviously, if you don't have any custom fields then this example gets a lot
+simpler (because you don't need to subclass Lead or use setCustomProperties() /
+convertSystemNames()).
+
+In the above example, the ValueObject does not know anything about the mapping
+of its properties to field system names; the Connection object handles this for
+create/update operations, and after 'get' operations you need to explicitly
+convert them back to custom property names before constructing the object.
+
+There is also another way: you can set the mapping in the ValueObject instead of
+the Connection.
+
+```php
+$mapping = ['shoeSize' => 'shoe_size_384c1e3eacbb3'];
+// $api->setCustomProperties('lead', $mapping) is not called here.
+
+// For create:
+$lead = new ShoeStoreLead([], $mapping);
+$lead->firstName = 'Roderik';
+$lead->emailAddress = rm@wyz.biz';
+$lead->shoeSize = 12;
+$api->createLead($lead);
+// Note you could also add all the properties in the first argument of the
+// constructor, instead of setting them individually - although that more or
+// less defeats the purpose of using a ValueObject in the first place. Setting
+// 'shoeSize' works just as well as 'shoe_size_384c1e3eacbb3', in that first
+// argument. Just don't set values for _both_ the field name _and_ its property
+// alias, because then the library does not guarantee which of the two will be
+// used.
+
+// For 'get':
+$leads = $api->getLeads(['emailAddress' => 'rm@wyz.biz']);
+$lead = reset($leads);
+$my_lead_obj = new ShoeStoreLead($my_lead, $mapping);
+```
+
+So: for ValueObjects that have custom fields, there is the option of setting a
+mapping the connection, or setting it in the ValueObject. The latter has the
+advantage that data retrieved from the REST API is automatically converted in
+the constructor, but the disadvantage that the mapping needs to be set _every_
+time an object is constructed.
+
+There is another way: either hardcoding the mapping inside the object, like:
+
+    // Override the parent's (empty) property mapping variable:
+    protected $_customProperties = ['shoeSize' => 'shoe_size_384c1e3eacbb3'];
+
+...or making your custom ValueObject subclass' constructor set it (or derive it
+from somewhere). That will likely be code specific to your own situation.
+
+Choose your own preferred approach.
 
 ## API Bugs
 

@@ -91,15 +91,17 @@ class ValueObject
      *
      * The mapping can be handled in different ways, depending on the use case:
      * - define $_customProperties statically in the subclass;
-     * - set it in the constructor;
-     * - or call setCustomProperties() on a Connection object.
+     * - set/derive it in the ValueObject constructor code;
+     * - pass the mapping as an argument to every ValueObject constructor;
+     * - or call setCustomProperties() on a Connection object; this will make
+     *   values be converted automatically if a ValueObject is used in
+     *   update/create/... calls to the Connection object, but does not have
+     *   any effect if you want to feed data returned _from_ the API (which
+     *   includes field system names) into a ValueObject.
      * The former two ways are more straightforward, but not suitable in general
      * code that is not tied to specific Sharpspring accounts, because in that
-     * case we don't know beforehand how to derive the field system names. This
-     * means all toArray() calls need to pass the mapping (because
-     * $_customProperties is never set in the class); most create/update methods
-     * on the Connection object do this transparently after
-     * setCustomProperties() is called.
+     * case we don't know beforehand how to derive the field system names. The
+     * latter two have their own challenges (as per above).
      *
      * Beware that all code in this library makes the following implicit
      * assumptions, which you are expected to follow:
