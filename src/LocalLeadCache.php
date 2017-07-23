@@ -448,7 +448,6 @@ class LocalLeadCache
     /**
      * Retrieves a lead (array not object) from the key-value store or remotely.
      *
-     *
      * If fetched remotely, the lead is cached in the key-value store and the
      * in-memory cache is updated. This can be important for fetching inactive
      * leads which cacheAllLeads() does not do.

@@ -143,11 +143,6 @@ class CurlClient
      *
      * @return array
      *   A structure corresponding to the JSON response returned by the API.
-     *     The
-     *   values of individual fields are apparently always HTML-encoded. (At
-     *   least in a Lead's fields, '>' is encoded to '&gt;'; that's what we
-     *     know
-     *   for sure.)
      *
      * @throws \UnexpectedValueException
      *   If the REST API response has an unexpected format.

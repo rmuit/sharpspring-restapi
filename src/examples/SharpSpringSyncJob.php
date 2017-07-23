@@ -98,7 +98,8 @@ class SharpSpringSyncJob extends DrunkinsJob
      * Schedule (cron expression) for fully refreshing the key-value store.
      *
      * ONLY IMPLEMENTED FOR UI, not for non-interactive job runs, as long as the
-     * Sharpspring API issues noted in start() are not solved.
+     * Sharpspring API issues noted in start() at 'new LocalLeadCache' are not
+     * solved.
      *
      * Having a key-value store introduces risks of skipping updates**, by
      * definition. (Or doing too many updates, but that does not have big
@@ -133,8 +134,8 @@ class SharpSpringSyncJob extends DrunkinsJob
      * side.
      *
      * NOTES:
-     * - once it becomes possible for start() to start looping, it's
-     *   detrimental for this to be too high.
+     * - once it becomes possible for start() / to start looping to populate
+     *   LocalLeadCache's cache, it's detrimental for this to be too high.
      * - suppose there is a need for this to be >0 (because updates don't hit
      *   Sharpspring immediately sometimes). Then you're going to see errors
      * about missing updates in finish(). In other words: if you never see
@@ -326,7 +327,7 @@ class SharpSpringSyncJob extends DrunkinsJob
                 ':input[name="fetcher_timestamp_ignore"]' => ['checked' => false],
             ]],
         ];
-        // - noops are only doing anythying when displaying items.
+        // - noops are only doing anything when displaying items.
         // - We want to be able to select the option from the UI for both full
         //   and time-incremental runs.
         // - We have a slight preference for having default true for incremental
@@ -476,7 +477,10 @@ class SharpSpringSyncJob extends DrunkinsJob
             //   exactly match the earlier ones. We cannot do this reliably
             //   until Sharpspring gets options to sort the output on a fixed
             //   field (like id,created) & do queries with 'larger/smaller'
-            //   filters on that field.
+            //   filters on that field. OR if Sharpspring guarantees that
+            //   the return value from getLeadsDateRange is sorted by the
+            //   requested date, so we can just increase the 'from' date in the
+            //   query.
             if ($refresh_since !== '-' && $refresh_since !== '--') {
                 $this->setLastLeadCacheUpdateTime($new_timestamp);
             }

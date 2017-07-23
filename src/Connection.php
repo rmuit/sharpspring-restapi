@@ -495,9 +495,11 @@ class Connection
                 throw new UnexpectedValueException("Sharpspring REST API interpreter failure while evaluating error: no 'objects' (array) input parameter present for the $method method.\nResponse: " . json_encode($response), 6);
             }
             // If 'throw_for_individual_object' is set, this can throw a
-            // SharpSpringRestApiException with the specific message / code /
-            // data; we don't check the whole result before throwing the generic
-            // one below.
+            // SharpSpringRestApiException with an object's specific message /
+            // code / data, if an 'error' for that object is set. So it provides
+            // a 'better' error, at the cost of ignoring any generic message /
+            // code, or anomalies in the returned structure, or even checking if
+            // there is more than one object error.
             $this->validateResultForObjects($result, $params['objects'], $method, !empty($response_checks['throw_for_individual_object']), true);
 
             // Validate the result array against the 'error' array (which is
@@ -629,13 +631,14 @@ class Connection
     protected function callLimited($method, $single_result_key, array $where, $limit = null, $offset = null, $extra_params = [])
     {
         $params = $extra_params;
-        // API method definitions are inconsistent (according to the docs):
+        // API method definitions are not all consistent, which (is fine; most
+        // are correctly documented; it just) means below code cannot treat them
+        // all the same:
+        // - one has no 'where' (getEmailJobs).
+        // - one has 'where' defined as optional (getEmailListing. Note
+        //   getActiveLists is wrongly documented; it says the 'where' argument
+        //   is optional but it's actually required.)
         // - most have 'where' defined as required, even when the value is empty
-        // - some have 'where' defined as optional (getEmailListing and
-        //   getActiveLists; the latter however turns out not be wrongly
-        //   documented; it's actually required. Not sure about getEmailListing
-        //   yet.)
-        // - some have no 'where' (getEmailJobs).
         // We'll hardcode these here. This serves as documentation ot the same
         // time. Any method that passes extra parameters, is assumed *not* to
         // have a 'where'. (Like getLeadsDateRange, whose limit/offset
@@ -727,7 +730,8 @@ class Connection
             // Just a note: alphanumeric keys could be provided to the REST API
             // methods but don't make any difference in how the call is
             // processed or its returned results. It might have been convenient
-            // to preserve input keys for the updateLeads call, but in the end
+            // to preserve input keys here (and reinsert them in the result
+            // returned by the API) for the updateLeads call, but in the end
             // that's only really useful in case errors are encountered, and
             // it's a bit too much trouble.
             $params['objects'][] = $lead;
@@ -1376,7 +1380,6 @@ class Connection
         return reset($result);
     }
 
-
     /**
      * Retrieves a list of Deal Stage objects.
      *
@@ -1394,6 +1397,7 @@ class Connection
      */
     public function getDealStages(array $where = [], $limit = null, $offset = null)
     {
+        // Result key documented as dealStages is actually dealStage
         return $this->callLimited('getDealStages', 'dealStage', $where, $limit, $offset);
     }
 
@@ -1422,6 +1426,52 @@ class Connection
     }
 
     /**
+     * Retrieves a list of EmailListing objects.
+     *
+     * @param int $id
+     *   List ID. Unknown values will not return a validation error; they will
+     *   just make the method return an empty list.
+     * @param int $limit
+     *   (optional) A limit to the number of objects returned.
+     * @param int $offset
+     *   (optional) The index in the full list of objects, of the first object
+     *   to return. Zero-based.
+     *
+     * @return array
+     *   An array of EmailListing table rows.
+     */
+    public function getEmailListing($id = null, $limit = null, $offset = null)
+    {
+        // 'where' is an optional parameter; we'll just always pass it because
+        // that's how callLimited works (because this is actually the only API
+        // call where 'where' is optional).
+        $where = [];
+        if (isset($id)) {
+            $where['id'] = $id;
+        }
+        // Result key documented as 'fields' is actually getAllemailListings.
+        return $this->callLimited('getEmailListing', 'getAllemailListings', $where, $limit, $offset);
+    }
+
+    /**
+     * Retrieves a list of emailListing objects.
+     *
+     * @param int $limit
+     *   (optional) A limit to the number of objects returned.
+     * @param int $offset
+     *   (optional) The index in the full list of objects, of the first object
+     *   to return. Zero-based.
+     *
+     * @return array
+     *   An array of EmailJob table rows.
+     */
+    public function getEmailJobs($limit = null, $offset = null)
+    {
+        // Note double s in result key.
+        return $this->callLimited('getEmailJobs', 'getAllgetEmailJobss', [], $limit, $offset);
+    }
+
+    /**
      * Retrieves a list of active Lists.
      *
      * @param int $id
@@ -1438,8 +1488,9 @@ class Connection
     {
         // 'where' is a required parameter but it may be empty. (The API v1.1.17
         // documentation says that the 'where' parameter is "optional", but it's
-        // wrong; it is actually required (and for other calls it says
-        // "required", even when it may be empty).
+        // wrong; it is actually required. That behavior is consistent with most
+        // other API method calls where the documentation says "required", even
+        // when it may be empty.
         $where = [];
         if (isset($id)) {
             $where['id'] = $id;
@@ -1463,11 +1514,13 @@ class Connection
      *   An array of ActiveListMember table rows. (Not ListMember table rows;
      *   those have a different structure. The Schema tab which documents the
      *   returned fields calls the table ActiveListMember, though the Methods
-     *   tab calls it listMembers.)
+     *   tab calls it listMembers in the overview table and list<List> in the
+     *   return data.)
      */
     public function getListMembers($id, $limit = null, $offset = null)
     {
         $where = ['id' => $id];
+        // Result key documented as 'fields' is actually getWherelistMemberGets.
         return $this->callLimited('getListMembers', 'getWherelistMemberGets', $where, $limit, $offset);
     }
 
@@ -1518,6 +1571,8 @@ class Connection
      */
     public function getUnsubscribeCategories()
     {
+        // Result key documented as getAllUnsubscribeCategories is actually
+        // getAllunsubscribeCategorys.
         return $this->call('getUnsubscribeCategories', [], ['single_result_key' => 'getAllunsubscribeCategorys']);
     }
 }
