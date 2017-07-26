@@ -161,6 +161,20 @@ class SharpSpringSyncJob extends DrunkinsJob
     const LEADS_UPDATE_WAIT = 0;
 
     /**
+     * Wait time in seconds before fetching changed leads on finish().
+     *
+     * finish() must doublecheck all updated leads and does a getLeadsDateRange
+     * call for that. Sometimes this call will not return leads that are
+     * actually updated, and the likely cause is that they are not fully
+     * processed / indexed yet. If we let the process sleep for a few seconds
+     * before doing the getLeadsDateRange call, this problem should go away.
+     *
+     * This value is effectively added to the LEADS_UPDATE_WAIT time (which is
+     * the number of seconds to sleep after an updateLeads call).
+     */
+    const LEADS_FETCH_FINISH_WAIT = 3;
+
+    /**
      * A mapping for action => action code, as used in start().
      *
      * Should be a private const (but array consts don't work in 5.5). Private
@@ -1221,6 +1235,9 @@ class SharpSpringSyncJob extends DrunkinsJob
             if (empty($context['sharpspring_start_updates']) || !is_int($context['sharpspring_start_updates'])) {
                 $this->log('Start timestamp was lost! Now we cannot doublecheck whether all updates actually succeeded.', [], WATCHDOG_ERROR);
             } else {
+                if (static::LEADS_FETCH_FINISH_WAIT) {
+                    sleep(static::LEADS_FETCH_FINISH_WAIT);
+                }
                 $ignore_cache = $this->getLastLeadCacheUpdateTime() == -1;
                 $sharpspring = $this->getSharpSpring($ignore_cache ? [] : $context);
                 $new_timestamp = time();
