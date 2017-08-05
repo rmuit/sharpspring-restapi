@@ -113,7 +113,7 @@ abstract class SharpspringRemovedListMembersJob extends DrunkinsJob
         if (!empty($removed_list_member['hardBounced'])) {
             return $priority ? 3 : ['bounced', true];
         } elseif (!empty($removed_list_member['isUnsubscribed'])) {
-            return $priority ? 3 : ['newsletter_opt_out', true];
+            return $priority ? 2 : ['newsletter_opt_out', true];
         } elseif (!empty($removed_list_member['isRemoved'])) {
             return $priority ? 1 : ['newsletter_subscribed', false];
         }
