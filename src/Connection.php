@@ -1075,7 +1075,7 @@ class Connection
      *   (optional) One option key is recognized so far: 'fix_empty_leads'. If
      *   set to a 'true' value, then return an empty array if the lead returned
      *   from the REST API contains no 'id' value. Reason: (as of API v1.117,
-     *   20170127) queries for a nonexistent lead *may* return an array with
+     *   2017-01-27) queries for a nonexistent lead *may* return an array with
      *   values leadStatus = open, and all custom fields with an empty value; no
      *   other values. This class chooses to not alter return values by default
      *   (because who knows what hidden problems that could cause), in the hope
@@ -1160,21 +1160,24 @@ class Connection
     /**
      * Retrieves Leads that were created or updated in a given time frame.
      *
-     * Please note the returned updateTimestamp value for the leads is expressed
-     * in UTC, while the getLead() / getLeads() calls return the value expressed
-     * in the local timezone (however this may be determined).
+     * Two things were changed around 2017-07-26, without announcement or
+     * increase in the API version (1.117):
+     * - until then, if a lead was updated to be inactive, it would still be
+     *   part of the 'update' dataset returned by this call. From then on,
+     *   inactive leads are not part of the returned dataset anymore.
+     * - until then, both the format of startDate and endDate call parameters
+     *   and the format of the value returned in the updateTimestamp fields was
+     *   UTC. From then on, the format was the 'local timezone'. (However this
+     *   may be determined; see Lead::$updateTimestamp for comments.)
      *
-     * If a lead was updated to be inactive, it is still part of the 'update'
-     * dataset retrieved by this call.
-     *
-     * Warning: the number of leads returned is capped at 500 by default.
-     * Luckily this call also has (undocumented) 'limit' and 'offset' params.
+     * Warning: the number of leads returned is capped at 500 by default. (At
+     * least: it was around december 2016 - february 2017). Luckily this call
+     * also has (undocumented) 'limit' and 'offset' parameters.
      *
      * @param string $start_date
-     *   Start of date range; format Y-m-d H:i:s, assuming UTC.
+     *   Start of date range; format Y-m-d H:i:s.
      * @param string $end_date
-     *   (optional) End of date range; format Y-m-d H:i:s, assuming UTC.
-     *   Defaults to 'now'.
+     *   (optional) End of date range; format Y-m-d H:i:s. Defaults to 'now'.
      * @param $time_type
      *   (optional) The field to filter for dates: update (default) or create.
      *   (For completeness: leads which have been created once and never updated
@@ -1196,7 +1199,7 @@ class Connection
     public function getLeadsDateRange($start_date, $end_date = '', $time_type = 'update', $limit = null, $offset = null)
     {
         $params['startDate'] = $start_date;
-        $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
+        $params['endDate'] = $end_date ? $end_date : date('Y-m-d H:i:s');
         $params['timestamp'] = $time_type;
         return $this->callLimited('getLeadsDateRange', 'lead', [], $limit, $offset, $params);
     }
@@ -1259,11 +1262,15 @@ class Connection
     /**
      * Retrieves Accounts that were created or updated in a given time frame.
      *
+     * We assume this is local time (for whatever definition of local time that
+     * Sharpspring has) but have not tested! Note that around 2017-07-26,
+     * getLeadsDateRange switched from UTC to local timezone (both the format it
+     * accepts and the format it displays in output) without announcement.
+     *
      * @param string $start_date
-     *   Start of date range; format Y-m-d H:i:s, assuming UTC (not tested).
+     *   Start of date range; format Y-m-d H:i:s.
      * @param string $end_date
-     *   (optional) End of date range; format Y-m-d H:i:s, assuming UTC (not
-     *   tested). Defaults to 'now'.
+     *   (optional) End of date range; format Y-m-d H:i:s. Defaults to 'now'.
      * @param $time_type
      *   (optional) The field to filter for dates: update (default) or create.
      *
@@ -1275,7 +1282,7 @@ class Connection
     public function getAccountsDateRange($start_date, $end_date = '', $time_type = 'update')
     {
         $params['startDate'] = $start_date;
-        $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
+        $params['endDate'] = $end_date ? $end_date : date('Y-m-d H:i:s');
         $params['timestamp'] = $time_type;
         return $this->call('getAccountsDateRange', $params, ['single_result_key' => 'account']);
     }
@@ -1322,11 +1329,16 @@ class Connection
     /**
      * Retrieves Campaigns that were created or updated in a given time frame.
      *
+     *
+     * We assume this is local time (for whatever definition of local time that
+     * Sharpspring has) but have not tested! Note that around 2017-07-26,
+     * getLeadsDateRange switched from UTC to local timezone (both the format it
+     * accepts and the format it displays in output) without announcement.
+     *
      * @param string $start_date
-     *   Start of date range; format Y-m-d H:i:s, assuming UTC (not tested).
+     *   Start of date range; format Y-m-d H:i:s.
      * @param string $end_date
-     *   (optional) End of date range; format Y-m-d H:i:s, assuming UTC (not
-     *   tested). Defaults to 'now'.
+     *   (optional) End of date range; format Y-m-d H:i:s. Defaults to 'now'.
      * @param $time_type
      *   (optional) The field to filter for dates: update (default) or create.
      *
@@ -1338,7 +1350,7 @@ class Connection
     public function getCampaignsDateRange($start_date, $end_date = '', $time_type = 'update')
     {
         $params['startDate'] = $start_date;
-        $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
+        $params['endDate'] = $end_date ? $end_date : date('Y-m-d H:i:s');
         $params['timestamp'] = $time_type;
         return $this->call('getCampaignsDateRange', $params, ['single_result_key' => 'campaign']);
     }
@@ -1404,11 +1416,15 @@ class Connection
     /**
      * Retrieves DealStages that were created or updated in a given time frame.
      *
+     * We assume this is local time (for whatever definition of local time that
+     * Sharpspring has) but have not tested! Note that around 2017-07-26,
+     * getLeadsDateRange switched from UTC to local timezone (both the format it
+     * accepts and the format it displays in output) without announcement.
+     *
      * @param string $start_date
-     *   Start of date range; format Y-m-d H:i:s, assuming UTC (not tested).
+     *   Start of date range; format Y-m-d H:i:s.
      * @param string $end_date
-     *   (optional) End of date range; format Y-m-d H:i:s, assuming UTC (not
-     *   tested). Defaults to 'now'.
+     *   (optional) End of date range; format Y-m-d H:i:s. Defaults to 'now'.
      * @param $time_type
      *   (optional) The field to filter for dates: update (default) or create.
      *
@@ -1420,7 +1436,7 @@ class Connection
     public function getDealStagesDateRange($start_date, $end_date = '', $time_type = 'update')
     {
         $params['startDate'] = $start_date;
-        $params['endDate'] = $end_date ? $end_date : gmdate('Y-m-d H:i:s');
+        $params['endDate'] = $end_date ? $end_date : date('Y-m-d H:i:s');
         $params['timestamp'] = $time_type;
         return $this->call('getDealStagesDateRange', $params, ['single_result_key' => 'dealStage']);
     }

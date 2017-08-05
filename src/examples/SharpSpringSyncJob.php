@@ -128,20 +128,37 @@ class SharpSpringSyncJob extends DrunkinsJob
     /**
      * Overlap period (in seconds) from previous update.
      *
-     * We should set this to the number of seconds during which we do not trust
-     * an update to show up in the getLeadsDateRange. (If the REST API is
-     * perfect, and updates show up immediately, this is 0.) 50 is on the high
-     * side.
+     * If we do not trust updates to show up in the getLeadsDateRange return
+     * value immediately, then we can experiment with setting this value. The
+     * main goal is to be able to catch values that would have been updated by
+     * external processes in the last N seconds, which we would otherwise miss.
+     * (For other goals, we can set LEADS_FETCH_AFTER_UPDATE_WAIT.)
      *
-     * NOTES:
-     * - once it becomes possible for start() / to start looping to populate
-     *   LocalLeadCache's cache, it's detrimental for this to be too high.
-     * - suppose there is a need for this to be >0 (because updates don't hit
-     *   Sharpspring immediately sometimes). Then you're going to see errors
-     * about missing updates in finish(). In other words: if you never see
-     * those errors, then this setting can be 0. (Or just a few seconds.)
+     * It is not known whether this value is ever useful in Sharpspring; it was
+     * mainly introduced because this kind of lag was observed in other systems,
+     * and _some_ kind of update throttling behavior was experienced in
+     * Sharprpsing around the beginning of 2017 but that seems to have gone
+     * away.
+     *
+     * Note: once it becomes possible for start() / to start looping to populate
+     * LocalLeadCache's cache, it's detrimental for this to be too high.
      */
-    const KEYVALUE_UPDATE_OVERLAP = 50;
+    const KEYVALUE_UPDATE_OVERLAP = 0;
+
+    /**
+     * Wait time in seconds before fetching changed leads on finish().
+     *
+     * If we do not trust updates to show up in the getLeadsDateRange return
+     * value immediately, then we can experiment with setting this value.
+     *
+     * It is not known whether this is ever useful; it was introduced at a time
+     * where the getLeadsDateRange suddenly changed its output format, which was
+     * only spotted after this constant was created.
+     *
+     * This value is effectively adding to the LEADS_UPDATE_WAIT time (which is
+     * the number of seconds to sleep after an updateLeads call).
+     */
+    const LEADS_FETCH_AFTER_UPDATE_WAIT = 0;
 
     /**
      * The maximum number of leads to create/update in one Sharpspring API call.
@@ -159,20 +176,6 @@ class SharpSpringSyncJob extends DrunkinsJob
      * (While I was writing this from jan-mar 2017 this seems to have gone away)
      */
     const LEADS_UPDATE_WAIT = 0;
-
-    /**
-     * Wait time in seconds before fetching changed leads on finish().
-     *
-     * finish() must doublecheck all updated leads and does a getLeadsDateRange
-     * call for that. Sometimes this call will not return leads that are
-     * actually updated, and the likely cause is that they are not fully
-     * processed / indexed yet. If we let the process sleep for a few seconds
-     * before doing the getLeadsDateRange call, this problem should go away.
-     *
-     * This value is effectively added to the LEADS_UPDATE_WAIT time (which is
-     * the number of seconds to sleep after an updateLeads call).
-     */
-    const LEADS_FETCH_FINISH_WAIT = 3;
 
     /**
      * A mapping for action => action code, as used in start().
@@ -538,8 +541,9 @@ class SharpSpringSyncJob extends DrunkinsJob
             // subset of 'sent'/'error': only the above categories add up to
             // the total items processed; this category is not part of it.
             'remove' => [],
-            // Separate: mapping of SS id => e-mail for update calls made
-            'updates_emails' => [],
+            // Separate: mapping of SS id => some values e-mail for update calls
+            // made.
+            'updated_values' => [],
         ];
 
         // Preprocess the deduped items. We'll go through all items and check if
@@ -1089,7 +1093,10 @@ class SharpSpringSyncJob extends DrunkinsJob
                 } else {
                     $context['sent'][$ss_id] = $src_id;
                     if (!$create_new) {
-                        $context['updates_emails'][$ss_id] = $lead->emailAddress;
+                        $context['updated_values'][$ss_id]['emailAddress'] = $lead->emailAddress;
+                        if (isset($lead->active)) {
+                            $context['updated_values'][$ss_id]['active'] = $lead->active;
+                        }
                     }
                 }
             }
@@ -1114,7 +1121,10 @@ class SharpSpringSyncJob extends DrunkinsJob
                             $context['sent'][] = $src_id;
                         } else {
                             $context['sent'][$ss_id] = $src_id;
-                            $context['updates_emails'][$ss_id] = $item[$i]->emailAddress;
+                            $context['updated_values'][$ss_id]['emailAddress'] = $item[$i]->emailAddress;
+                            if (isset($item[$i]->active)) {
+                                $context['updated_values'][$ss_id]['active'] = $item[$i]->active;
+                            }
                         }
                     } catch (SharpSpringRestApiException $e) {
                         $compare = false;
@@ -1235,15 +1245,15 @@ class SharpSpringSyncJob extends DrunkinsJob
             if (empty($context['sharpspring_start_updates']) || !is_int($context['sharpspring_start_updates'])) {
                 $this->log('Start timestamp was lost! Now we cannot doublecheck whether all updates actually succeeded.', [], WATCHDOG_ERROR);
             } else {
-                if (static::LEADS_FETCH_FINISH_WAIT) {
-                    sleep(static::LEADS_FETCH_FINISH_WAIT);
+                if (static::LEADS_FETCH_AFTER_UPDATE_WAIT) {
+                    sleep(static::LEADS_FETCH_AFTER_UPDATE_WAIT);
                 }
                 $ignore_cache = $this->getLastLeadCacheUpdateTime() == -1;
                 $sharpspring = $this->getSharpSpring($ignore_cache ? [] : $context);
                 $new_timestamp = time();
                 // Get leads updated since updates were started.
-                $since = gmdate('Y-m-d H:i:s', $context['sharpspring_start_updates'] - static::KEYVALUE_UPDATE_OVERLAP);
-                $leads = $sharpspring->getLeadsDateRange($since, gmdate('Y-m-d H:i:s'), 'update', 5000);
+                $since = date('Y-m-d H:i:s', $context['sharpspring_start_updates'] - static::KEYVALUE_UPDATE_OVERLAP);
+                $leads = $sharpspring->getLeadsDateRange($since, '', 'update', 5000);
                 // If our local cache was updated too, then increment the timestamp so
                 // that we don't need to get these leads next time.
                 if ($sharpspring instanceof LocalLeadCache) {
@@ -1254,30 +1264,47 @@ class SharpSpringSyncJob extends DrunkinsJob
                 // more precise, since we're only interested in updates (for
                 // which we have them).
                 foreach ($leads as $lead) {
-                    if (isset($context['updates_emails'][$lead['id']])
-                        && $context['updates_emails'][$lead['id']] !== $lead['emailAddress']) {
+                    if (isset($context['updated_values'][$lead['id']]['emailAddress'])
+                        && $context['updated_values'][$lead['id']]['emailAddress'] !== $lead['emailAddress']) {
                         // We've been hit by the updateLeads bug that does not
                         // actually update things. Convert lead to object just
                         // for logging - it is strange but oh well...
+                        $source_email = $context['updated_values'][$lead['id']]['emailAddress'];
                         $lead_obj = new LeadWithSourceId($lead);
                         if ($sharpspring instanceof LocalLeadCache) {
                             $this->logAndStore("Lead @id/@lead has e-mail address @email in the source system, but could not be updated in Sharpspring, probably because another lead with the same e-mail exists. This might get fixed on the next process run; if it does not, it will need manual action.",
-                                ['@id' => $lead['id'], '@lead' => $this->getLeadDescription($lead_obj), '@email' => $context['updates_emails'][$lead['id']]], WATCHDOG_ERROR);
+                                ['@id' => $lead['id'], '@lead' => $this->getLeadDescription($lead_obj), '@email' => $source_email], WATCHDOG_ERROR);
                             // Apparently the lead with the target e-mail is not
                             // in our cache (and apparently that is because it's
                             // disabled), so get this lead in our cache and see
                             // if the comparison in start() will yield different
                             // results next time.
-                            $sharpspring->getLeadsByEmail($context['updates_emails'][$lead['id']]);
+                            $sharpspring->getLeadsByEmail($source_email);
                         } else {
                             // We'll log a more detailed message for this but
                             // in the end we don't know how to fix this
                             // automatically so fall through to the below.
                             $this->logAndStore("Lead @id/@lead has e-mail address @email in the source system, but could not be updated in Sharpspring, probably because another lead with the same e-mail exists (which is probably disabled and therefore invisible in Sharpspring). This will need manual action (or reconfiguration of the job).",
-                                ['@id' => $lead['id'], '@lead' => $this->getLeadDescription($lead_obj), '@email' => $context['updates_emails'][$lead['id']]], WATCHDOG_ERROR);
+                                ['@id' => $lead['id'], '@lead' => $this->getLeadDescription($lead_obj), '@email' => $source_email], WATCHDOG_ERROR);
                         }
                     }
                     unset($sent_ss_ids[$lead['id']]);
+                }
+                if ($sent_ss_ids) {
+                    // getLeadsDateRange has suddenly started excluding inactive
+                    // leads so we cannot check these anymore, (So the whole
+                    // checking code from here on down is wonky. Still, we don't
+                    // want to completely delete it - it might warn os of
+                    // changes in the API like these...)
+                    foreach (array_keys($sent_ss_ids) as $ss_id) {
+                        // If we _know_ this contact is inactive, don't warn.
+                        // (It's not water tight if the 'active' property was\
+                        // not always set... though maybe start() can't even
+                        // work with that.)
+                        if (isset($context['updated_values'][$ss_id]['active']) && empty($context['updated_values'][$ss_id]['active'])) {
+                            unset($sent_ss_ids[$ss_id]);
+                        }
+                    }
                 }
                 // Any keys now left in $sent_ss_ids have apparently not been
                 // updated. (They could be creates rather than updates, but that
@@ -1361,13 +1388,13 @@ class SharpSpringSyncJob extends DrunkinsJob
      *
      * @param bool $for_display
      *   (optional) if true, changes the rules of deriving a bit and return in
-     *   local time. If false / not provided: return in UTC in a format that the
+     *   local time. If false / not provided: return in a format that the
      *   LocalLeadConstructor class can take.
      *
      * @return string
-     *   If $for_display is false: a time (in UTC), '' (for full refresh) or '-'
-     *   (for no refresh). If $for_display is true / not provided: same but in
-     *   local time and subject to different rules of deriving.
+     *   If $for_display is false: a time, '' (for full refresh) or '-' (for no
+     *   refresh). If $for_display is true / not provided: same but subject to
+     *   different rules of deriving.
      *
      * @throws \RuntimeException
      *   If settings are invalid and $for_display is false.
@@ -1381,7 +1408,7 @@ class SharpSpringSyncJob extends DrunkinsJob
             } elseif ($for_display) {
                 $date = date('Y-m-d\TH:i:s', $timestamp);
             } else {
-                $date = gmdate('Y-m-d H:i:s', $timestamp);
+                $date = date('Y-m-d H:i:s', $timestamp);
             }
         } else {
             $date = '';

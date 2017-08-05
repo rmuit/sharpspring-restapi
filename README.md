@@ -60,7 +60,8 @@ use SharpSpring\RestApi\CurlClient;
 $client = new CurlClient(['account_id' => ..., 'secret_key' => ...);
 $api = new Connection($client);
 
-// Get all leads updated after a certain time (notation in UTC).
+// Get all leads updated after a certain time (notation in 'local' timezone,
+// though there is no formal definition of what 'local' entails).
 $leads = $api->getLeadsDateRange('2017-01-15 10:00:00');
 ```
 
@@ -228,6 +229,35 @@ success_. This is a potential issue if you are mirroring an existing contact
 database where e-mail addresses are not necessarily unique, into Sharpspring.
 You will need to doublecheck your updates to see whether they succeeded. (One
 example of such code is in SharpspringSyncJob::finish().)
+
+(I'd welcome any reports of these bugs being fixed. They might; see 'warning'.)
+
+## Warning
+
+Sharpspring apparently sometimes changes the behavior of their API without
+announcement or documentation/changelogs (neither of which they do at all, to my
+knowledge), and even without increasing the API version mentioned in the online
+API documentation that can be found behind a login to their customer site.
+
+The takeaway from this, it seems, is that as an application developer you should
+be constantly testing your application because you cannot trust Sharpspring to
+not break their 'implicit contract' with you. Because Sharpspring apparently
+does not feel they have an 'implicit contract' with application developers.
+
+(I've had some suspicious feelings about this while I was developing this
+library over the course of half a year, but what I'm basing this on is their
+change in behavior of the getLeadsDateRange call (with the 'timestamp' parameter
+set to "update") - which changed both the format of the dates in parameters and
+output, and the contents of the output. See the source code. This lead to
+immediate effect -errors reported- in production systems which used the
+SharpspringSyncJob class, which had to be emergency-patched. The published API
+version is still 1.117 and has been since at least november 2016.
+
+The behavior change may have been caused by inconsistencies reported by me over
+and I'm glad they are fixing inconsistencies, but the lack of response,
+changelog or API version change still leads to the above takeaway. I'm of course
+hoping that this will change in the future and this warning may be deleted, but
+it really seems pertinent now.)
 
 ## Completeness
 

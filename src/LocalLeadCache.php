@@ -152,14 +152,15 @@ class LocalLeadCache
      *   The key-value store. (Not type hinted because we have no formal spec.)
      * @param string $refresh_cache_since
      *   If empty, this method will clear the local cache and read / cache all
-     *   (active) leads from the Sharpspring account. If set to a time (string
-     *   representation in format Y-m-d H:i:s), only the updates since then will
-     *   be read and cached on top of the current contents of the cache. The
-     *   time has no timezone specification but is in UTC (tested on API v1.117,
-     *   20170127). If '-', refreshing the cache will be skipped. If '--',
-     *   populating the in-memory caches will also be skipped, which means that
-     *   the class will be unusable until the caller re-fetches leads using
-     *   cacheAllLeads() or related functionality.
+     *   (active) leads from the Sharpspring account. If set to a time
+     *   representation, only the updates since then will be read and cached on
+     *   top of the current contents of the cache. (The format is the same as
+     *   expected by the getLeadsDateRange, which has unfortunately changed once
+     *   in the past without the API version 1.117 changing with it! See
+     *   Connection::getLeadsDateRange().) If '-', refreshing the cache will be
+     *   skipped. If '--', populating the in-memory caches will also be skipped,
+     *   which means that the class will be unusable until the caller re-fetches
+     *   leads using cacheAllLeads() or related functionality.
      * @param string $foreign_key
      *   (optional) The name of the foreign key field / source ID field. Leads
      *   can be retrieved by this field, though there is no guarantee that
@@ -176,6 +177,8 @@ class LocalLeadCache
      *
      * @throws \UnexpectedValueException
      *   If the key-value store somehow got corrupted and leads are not arrays.
+     *
+     * @see \SharpSpring\RestApi\Connection::getLeadsDateRange()
      */
     public function __construct(Connection $connection, $key_value_store, $refresh_cache_since, $foreign_key = null, array $cached_properties = [], LoggerInterface $logger = null)
     {
@@ -372,9 +375,6 @@ class LocalLeadCache
      * in-memory cache is updated. This can be important for fetching inactive
      * leads which cacheAllLeads() does not do.
      *
-     * NOTE: The updateTimestamp value is unreliable; it may be expressed in
-     * local time or UTC! See cacheAllLeads().
-     *
      * @param string $email
      *   The e-mail address.
      * @param bool $check_remotely
@@ -451,9 +451,6 @@ class LocalLeadCache
      * If fetched remotely, the lead is cached in the key-value store and the
      * in-memory cache is updated. This can be important for fetching inactive
      * leads which cacheAllLeads() does not do.
-     *
-     * NOTE: The updateTimestamp value is unreliable; it may be expressed in
-     * local time or UTC! See cacheAllLeads().
      *
      * @param int $sharpspring_id
      *   The lead's ID in Sharpspring.
@@ -557,13 +554,26 @@ class LocalLeadCache
     }
 
     /**
-     * Retrieves Leads in a given timeframe from the REST API, refreshes cache.
+     * Retrieves Leads in a given time frame from the REST API; refreshes cache.
+     *
+     * Two things were changed around 2017-07-26, without announcement or
+     * increase in the API version (1.117):
+     * - until then, if a lead was updated to be inactive, it would still be
+     *   part of the 'update' dataset returned by this call. From then on,
+     *   inactive leads are not part of the returned dataset anymore.
+     * - until then, both the format of startDate and endDate call parameters
+     *   and the format of the value returned in the updateTimestamp fields was
+     *   UTC. From then on, the format was the 'local timezone'. (However this
+     *   may be determined; see Lead::$updateTimestamp for comments.)
+     *
+     * Warning: the number of leads returned is capped at 500 by default. (At
+     * least: it was around december 2016 - february 2017). Luckily this call
+     * also has (undocumented) 'limit' and 'offset' parameters.
      *
      * @param string $start_date
-     *   Start of date range; format Y-m-d H:i:s, assuming UTC.
+     *   Start of date range; format Y-m-d H:i:s.
      * @param string $end_date
-     *   (optional) End of date range; format Y-m-d H:i:s, assuming UTC.
-     *   Defaults to 'now'.
+     *   (optional) End of date range; format Y-m-d H:i:s. Defaults to 'now'.
      * @param $time_type
      *   (optional) The field to filter for dates: update (default) or create.
      *   (For completeness: leads which have been created once and never
@@ -580,6 +590,7 @@ class LocalLeadCache
      * @return array
      *   An array of Lead structures.
      *
+     * @see \SharpSpring\RestApi\Connection::getLeadsDateRange()
      * @see Lead::$updateTimestamp
      */
     public function getLeadsDateRange($start_date, $end_date = '', $time_type = 'update', $limit = null, $offset = null)
@@ -794,19 +805,16 @@ class LocalLeadCache
     /**
      * Retrieves and caches all active leads from Sharpspring.
      *
-     * NOTE: The updateTimestamp value differs if we fetch it using getLeads vs.
-     * getLeadsDateRange, so do not trust the value of the property on the Lead
-     * objects! (It's expressed in local timezone vs. UTC, respectively. We
-     * could convert it, but it's not exactly clear how "local timezone" is
-     * defined.)
-     *
      * @param string $since
      *   If empty, this method will clear the local cache and read / cache all
-     *   (active) leads from the Sharpspring account. If set to a time (string
-     *   representation in format Y-m-d H:i:s), only the updates since then will
-     *   be read and cached on top of the current contents of the cache. The
-     *   time has no timezone specification but is in UTC (tested on API v1.117,
-     *   20170127).
+     *   (active) leads from the Sharpspring account. If set to a time
+     *   representation, only the updates since then will be read and cached on
+     *   top of the current contents of the cache. (The format is the same as
+     *   expected by the getLeadsDateRange, which has unfortunately changed once
+     *   in the past without the API version 1.117 changing with it! See
+     *   Connection::getLeadsDateRange().)
+     *
+     * @see \SharpSpring\RestApi\Connection::getLeadsDateRange()
      */
     public function cacheAllLeads($since)
     {

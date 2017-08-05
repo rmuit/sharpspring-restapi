@@ -274,19 +274,20 @@ class Lead extends ValueObject
      * definition of 'timestamp' a bit, because there is no timezone
      * information. There is also no API documentation on what the timestamp
      * means. What we know so far is:
-     * - the getLeadsDateRange call returns Lead objects with updateTimestamp
-     *   values expressed in UTC.
      * - the getLead and getLeads calls return Lead objects with
-     *   updateTimestamp values expressed in your local timezone(!!! However
-     *   that may be derived.)
-     * - if you change the timezone of your Web UI account, do updates, and then
-     *   change the timezome again... this has this has no effect on the
-     *   updateTimestamp that is ultimately received through API calls.
+     *   updateTimestamp values expressed in your local timezone.
+     * - the getLeadsDateRange call does too, since around 2017-07-26. (Before
+     *   that, it was UTC.)
+     * - Note we do not know how the 'local timezone' is defined! If you change
+     *   the timezone of your Web UI account, do updates, and then change the
+     *   timezome again... this has this has no effect on the updateTimestamp
+     *   that is ultimately received through API calls.
      * So the working theory is
      * - The date is actually stored on the server in a proper timestamp format;
      * - The date for getLead(s) calls is always converted to "your" timezone,
      *   probably using timezone information that is somehow connected to your
-     *   API key. (Unless it's IP based.)
+     *   API key but which is not the timezone setting in your Web UI. (Unless
+     *   it's IP based.)
      *
      * Let's assume this updateTimestamp is not updatable to specified values -
      * which is the only sane situation.
