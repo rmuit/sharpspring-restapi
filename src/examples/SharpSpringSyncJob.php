@@ -782,8 +782,13 @@ class SharpSpringSyncJob extends DrunkinsJob
                     // lead (executed in that order).
                     if ($lead_action_code == $this->actionCode['update_id'] && $other_lead_code == $this->actionCode['update_email']) {
                         $lead_action_code = $this->actionCode['new'];
+                        // Note that $compare still contains another lead, that
+                        // is now not supposed to be 'linked' to this lead! We
+                        // should check 'linked-ness' through the action code,
+                        // not through $compare.
                     } elseif ($lead_action_code == $this->actionCode['update_email'] && $other_lead_code == $this->actionCode['update_id']) {
                         $preprocessed_items[$other_lead_key][2] = $this->actionCode['new'];
+                        $preprocessed_items[$other_lead_key][1] = 0;
                     } elseif ($other_lead_code > $this->actionCode['clash']) {
                         if ($lead_action_code <= $other_lead_code) {
                             // If this is an update-to-be-inactive clashing with
@@ -863,7 +868,7 @@ class SharpSpringSyncJob extends DrunkinsJob
             if (!$lead_action_code) {
                 throw new RuntimeException("Internal error (code should be changed): could not determine what to do with contact {$this->getLeadDescription($lead)}.");
             } else {
-                $preprocessed_items[$lead_key] = [$lead, $compare ? $compare['id'] : 0, $lead_action_code];
+                $preprocessed_items[$lead_key] = [$lead, $lead_action_code === $this->actionCode['new'] ? 0 : $compare['id'], $lead_action_code];
                 // Update the 'seen' caches. (We know that if we are >3, any
                 // existing lead referenced in there currently will have been
                 // set to 1 or 2.)
@@ -875,7 +880,8 @@ class SharpSpringSyncJob extends DrunkinsJob
                 }
                 $lead_key++;
 
-                if (!empty($this->settings['list_format']) && !empty($this->settings['display_changed_values']) && count($compare) > $this->actionCode['clash_inactive']) {
+                if (!empty($this->settings['list_format']) && !empty($this->settings['display_changed_values'])
+                    && $lead_action_code !== $this->actionCode['new'] && count($compare) > 1) {
                     // Add the 'changed' old values into the lead. We'll need to
                     // convert fieldnames to properties. (Do this after we don't
                     // need the lead properties anymore, for above caching. the
@@ -984,14 +990,14 @@ class SharpSpringSyncJob extends DrunkinsJob
                     case $this->actionCode['new']:
                         // Doublecheck: must be creates.
                         if ($item[1]) {
-                            throw new RuntimeException("Internal error (code should be changed): Item is marked as create but still has a Sharpspring ID $item[1]: {$item[0]}.");
+                            throw new RuntimeException("Internal error (code should be changed): Item is marked as create but is still marked internally as having a Sharpspring ID $item[1]: " . json_encode($item[0]));
                         }
                         $creates[] = $item[0];
                         break;
                     default:
                         // Doublecheck: must be updates.
                         if (!$item[1]) {
-                            throw new RuntimeException("Internal error (code should be changed): Item is marked as update but still has no Sharpspring ID: {$item[0]}.");
+                            throw new RuntimeException("Internal error (code should be changed): Item is marked as update but still has no Sharpspring ID: " . json_encode($item[0]));
                         }
                         $item[0]->id = $item[1];
                         $items[] = $item[0];

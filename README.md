@@ -80,8 +80,8 @@ name. When this mapping is set (with your own choice of property names), any
 'objects' parameters in REST API calls will have their custom property names
 translated automatically to the corresponding field system names.
 
-So, Say you have leads for your shoe store, with a custom field for shoe size
-which you created through the Sharpspring UI, whose system name came out as
+Say you have leads for your shoe store, with a custom field for shoe size which
+you created through the Sharpspring UI, whose system name came out as
 shoe_size_384c1e3eacbb3. The following two examples are equivalent:
 ```php
 $api->createLead([
@@ -253,11 +253,12 @@ immediate effect -errors reported- in production systems which used the
 SharpspringSyncJob class, which had to be emergency-patched. The published API
 version is still 1.117 and has been since at least november 2016.
 
-The behavior change may have been caused by inconsistencies reported by me over
-and I'm glad they are fixing inconsistencies, but the lack of response,
-changelog or API version change still leads to the above takeaway. I'm of course
-hoping that this will change in the future and this warning may be deleted, but
-it really seems pertinent now.)
+The behavior change may have been caused by inconsistencies reported by me (I
+had a short e-mail exchange, which ended with me sending a list of issues 
+encountered with their API), and I'm glad they are fixing inconsistencies, but 
+the lack of response, changelog or API version change still leads to the above 
+takeaway. I'm of course hoping that this will change in the future and this
+warning may be deleted, but it really seems pertinent now.)
 
 ## Completeness
 
