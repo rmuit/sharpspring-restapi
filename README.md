@@ -260,6 +260,16 @@ the lack of response, changelog or API version change still leads to the above
 takeaway. I'm of course hoping that this will change in the future and this
 warning may be deleted, but it really seems pertinent now.)
 
+### Update
+
+Oh look! https://help.sharpspring.com/hc/en-us/articles/115001069228-Open-API-Overview
+now mentions they have a 'v1' API and a 'v1.2' API! The second apparently
+accepts date input as UTC (which is what their v1 API did until around 
+2017 July 26th). There's no mention of the format of output dates (which were
+also changed in v1), so that would need testing. This library currently only
+does API v1 and should be extended. It's not on my shortlist so PRs (or a paid 
+assignment ;)) are welcomed.
+
 ## Completeness
 
 This code has been tested with Leads and ListMembers. More API calls are present
