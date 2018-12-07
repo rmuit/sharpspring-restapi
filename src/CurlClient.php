@@ -176,7 +176,7 @@ class CurlClient
             // uses low error codes and <1000 is used by the Sharpspring API,
             // add 1600 to the thrown code, in case the caller cares about
             // distinguishing them.
-            throw new RuntimeException("CURL returned code: $curl_errno / error: \"$curl_error\" / response body: \"$response\"", $curl_error + 1000);
+            throw new RuntimeException("CURL returned code: $curl_errno / error: \"$curl_error\" / response body: \"$response\"", (int) $curl_errno + 1000);
         }
         // We'll start out strict, and throw on all unexpected return codes.
         if ($http_code != 200 && $http_code != 201) {
