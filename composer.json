@@ -14,5 +14,8 @@
         "psr-4": {
             "SharpSpring\\RestApi\\": "src"
         }
+    },
+    "require": {
+        "psr/log": "^1.1"
     }
 }

@@ -347,7 +347,7 @@ class Connection
      * @param string
      *   The method called (for logging purposes).
      *
-     * @see getLastCallResponse
+     * @see Connection::getLastCallResponse
      */
     protected function setLastCallResponse(array $response, $method = '')
     {
@@ -567,7 +567,7 @@ class Connection
      * will throw an exception if the result contains an error or cannot be
      * validated.
      *
-     * @param $object_result
+     * @param array $object_result
      *   The result of the operation on a single object. (This should be an
      *   array containing at least 2 keys 'success' and 'error', which this
      *   function will validate.)
