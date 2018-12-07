@@ -1591,4 +1591,9 @@ class Connection
         // getAllunsubscribeCategorys.
         return $this->call('getUnsubscribeCategories', [], ['single_result_key' => 'getAllunsubscribeCategorys']);
     }
+
+    public function getLeadTimeline($where = [])
+    {
+        return $this->callLimited('getLeadTimeline', 'event', $where);
+    }
 }
