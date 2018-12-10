@@ -1596,4 +1596,9 @@ class Connection
     {
         return $this->callLimited('getLeadTimeline', 'leadTimeline', $where);
     }
+
+    public function getOpportunityLeads($where = [])
+    {
+        return $this->callLimited('getOpportunityLeads', 'opportunityLeads', $where);
+    }
 }
