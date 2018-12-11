@@ -1597,8 +1597,81 @@ class Connection
         return $this->callLimited('getLeadTimeline', 'leadTimeline', $where);
     }
 
+    /**
+     * Retrieves a single opportunity by its ID.
+     *
+     * @param int $id
+     *   The opportunity ID.
+     * @param array $options
+     *   (optional) Reserved for future use
+     *
+     * @return array
+     *   An opportunity table row (in array format as returned from the REST API; not as
+     *   an Opportunity object). Empty array if not found.
+     */
+    public function getOpportunity($id, $options = [])
+    {
+        $params = [];
+        $params['id'] = $id;
+        $opportunities = $this->call('getOpportunity', $params, ['single_result_key' => 'opportunity']);
+        /**
+         * @see Connection::getLead()
+         */
+        if (count($opportunities) > 1) {
+            throw new UnexpectedValueException("Sharpspring REST API failure: response result 'opportunity' value contains more than one object.'\nResponse: " . json_encode($opportunities), 16);
+        }
+        if ($opportunities) {
+            $opportunity = reset($opportunities);
+        } else {
+            // If not found *and* the 'custom fields' bug is not encountered, an
+            // empty array is returned. In this case we won't 'unwrap' it (to
+            // return null or false), but just return an empty array.
+            $opportunity = [];
+        }
+        return $opportunity;
+    }
+
+    /**
+     * Retrieves a list of Opportunity objects.
+     *
+     * @param array $where
+     *   A key-value array containing ONE item only, with key being one of 'id',
+     *  'ownerID','dealStageID','accountID','campaignID. The return
+     *  value will be one opportunity only if 'id' is specified.
+     * @param int $limit
+     *   (optional) A limit to the number of objects returned. A higher number
+     *   than 500 does not have effect; the number of objects returned will be
+     *   500 maximum. @todo confirm this is correct for opportunities
+     * @param int $offset
+     *   (optional) The index in the full list of objects, of the first object
+     *   to return. Zero-based. (To reiterate: this number is 'object based',
+     *   not 'batch/page based'.)
+     * @param array $options
+     *   (optional) Reserved for future use.
+     *
+     * @return array
+     *   An array of opportunity table rows (in array format as returned from the REST
+     *   API; not as Opportunity objects).
+     * @see Connection::getLead() for comment on 'null string values'.
+     */
+    public function getOpportunities($where = [], $limit = null, $offset = null, $options = [])
+    {
+        $opportunities = $this->callLimited('getOpportunities', 'opportunity', $where, $limit, $offset);
+
+        return $opportunities;
+    }
+
     public function getOpportunityLeads($where = [])
     {
         return $this->callLimited('getOpportunityLeads', 'getWhereopportunityLeads', $where);
+    }
+
+    public function getOpportunityLeadsDateRange($start_date, $end_date = '', $time_type = 'update', $limit = null, $offset = null)
+    {
+        $params = [];
+        $params['startDate'] = $start_date;
+        $params['endDate'] = $end_date ? $end_date : date('Y-m-d H:i:s');
+        $params['timestamp'] = $time_type;
+        return $this->callLimited('getOpportunityLeadsDateRange', 'opportunityLead', [], $limit, $offset, $params);
     }
 }
