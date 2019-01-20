@@ -178,7 +178,7 @@ class LocalLeadCache
      * @throws \UnexpectedValueException
      *   If the key-value store somehow got corrupted and leads are not arrays.
      *
-     * @see \SharpSpring\RestApi\Connection::getLeadsDateRange()
+     * @see Connection::getLeadsDateRange()
      */
     public function __construct(Connection $connection, $key_value_store, $refresh_cache_since, $foreign_key = null, array $cached_properties = [], LoggerInterface $logger = null)
     {
@@ -590,7 +590,7 @@ class LocalLeadCache
      * @return array
      *   An array of Lead structures.
      *
-     * @see \SharpSpring\RestApi\Connection::getLeadsDateRange()
+     * @see Connection::getLeadsDateRange()
      * @see Lead::$updateTimestamp
      */
     public function getLeadsDateRange($start_date, $end_date = '', $time_type = 'update', $limit = null, $offset = null)
@@ -696,13 +696,13 @@ class LocalLeadCache
      *   as many values as there are leads in the input argument, each being a
      *   fixed array value: [ 'success': true, 'error': null ]
      *
-     * @throws SharpSpringRestApiException
+     * @throws \SharpSpring\RestApi\SharpSpringRestApiException
      * @throws \UnexpectedValueException
      * @throws \RuntimeException
      *   See createLeads().
      *
-     * @see createLeads()
-     * @see updateLead()
+     * @see LocalLeadCache::createLeads()
+     * @see LocalLeadCache::updateLead()
      */
     public function updateLeads(array $leads)
     {
@@ -770,11 +770,11 @@ class LocalLeadCache
      *   as many values as there are leads in the input argument, each being a
      *   fixed array value: [ 'success': true, 'error': null ]
      *
-     * @throws SharpSpringRestApiException
+     * @throws \SharpSpring\RestApi\SharpSpringRestApiException
      * @throws \UnexpectedValueException
      * @throws \RuntimeException
      *
-     * @see createLeads()
+     * @see LocalLeadCache::createLeads()
      */
     public function deleteLeads(array $ids)
     {
@@ -814,7 +814,7 @@ class LocalLeadCache
      *   in the past without the API version 1.117 changing with it! See
      *   Connection::getLeadsDateRange().)
      *
-     * @see \SharpSpring\RestApi\Connection::getLeadsDateRange()
+     * @see Connection::getLeadsDateRange()
      */
     public function cacheAllLeads($since)
     {

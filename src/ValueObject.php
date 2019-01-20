@@ -257,5 +257,4 @@ class ValueObject
 
         return $type ? $schema[$type] : $schema;
     }
-
 }

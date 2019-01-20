@@ -1,4 +1,4 @@
-# Sharpspring REST API PHP tools
+# Sharpspring REST API PHP tools               [![Build Status](https://travis-ci.com/rmuit/sharpspring-restapi.svg?branch=master)](https://travis-ci.com/rmuit/sharpspring-restapi)
 
 This PHP library contains
 
@@ -275,6 +275,18 @@ assignment ;)) are welcomed.
 This code has been tested with Leads and ListMembers. More API calls are present
 but not all of them have been tested extensively and some are missing. Adding
 new calls is hopefully not a lot of work; pull requests are welcomed.
+
+## Contributing / building
+
+Just submit a PR or otherwise contact me.
+
+The 'build process' (see icon at the top; a similar passed/failed message will
+appear on PRs) is only checking coding standards against PHP5.6 / PSR2. There
+are no unit tests yet since this is just a thin layer of code wrapping around
+Sharpspring. Tell me if you think there should be tests and which / why. (It
+would obviously be nice to have a full suite of tests against _the live
+Sharpspring API_, but I guess that's a different issue and/or at least requires
+further coordination with them...)
 
 ## Authors
 

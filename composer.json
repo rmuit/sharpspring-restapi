@@ -7,7 +7,7 @@
         {
             "name": "Roderik Muit",
             "email": "rm@wyz.biz",
-            "homepage" : "http://wyz.biz/"
+            "homepage" : "https://wyz.biz/"
         }
     ],
     "autoload": {
@@ -16,6 +16,11 @@
         }
     },
     "require": {
+        "ext-curl": "*",
+        "ext-json": "*",
         "psr/log": "^1.1"
+    },
+    "require-dev": {
+        "squizlabs/php_codesniffer": "^3.4"
     }
 }

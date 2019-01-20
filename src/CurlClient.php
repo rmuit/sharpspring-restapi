@@ -97,7 +97,8 @@ class CurlClient
      * @throws \InvalidArgumentException
      *  For disallowed header fields/values.
      */
-    protected function httpHeaders(array $headers) {
+    protected function httpHeaders(array $headers)
+    {
         // The spec for what is allowed (rfc7230) is not extremely detailed:
         // - field names MUST not have spaces before the colon; servers MUST
         //   reject such messages.
@@ -260,7 +261,7 @@ class CurlClient
     {
         if (!is_array($response)) {
             $response = json_decode($response, true);
-            if ($response === NULL) {
+            if ($response === null) {
                 throw new UnexpectedValueException("Response holds invalid JSON (or null).\nValue (possibly double-encoded): " . json_encode($response), 3);
             }
         }
