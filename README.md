@@ -57,7 +57,7 @@ use SharpSpring\RestApi\CurlClient;
 // concerns is considered more important, so (since the actual API call was
 // abstracted into CurlClient) creating a new connection takes 2 lines instead
 // of 1:
-$client = new CurlClient(['account_id' => ..., 'secret_key' => ...);
+$client = new CurlClient(['account_id' => ..., 'secret_key' => ...]);
 $api = new Connection($client);
 
 // Get all leads updated after a certain time (notation in 'local' timezone,
