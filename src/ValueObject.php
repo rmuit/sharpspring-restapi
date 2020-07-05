@@ -202,8 +202,10 @@ class ValueObject
         //   see comments near the class variables.)
         $nullable = array_flip(static::$_nullableProperties);
         foreach ($this as $name => $value) {
-            if ((strpos($name, '_') !== 0 || isset($custom_properties[$name]))
-                && (isset($nullable[$name]) ? $value !== "\0" && $value !== '' : $value !==  null)) {
+            if (
+                (strpos($name, '_') !== 0 || isset($custom_properties[$name]))
+                && (isset($nullable[$name]) ? $value !== "\0" && $value !== '' : $value !== null)
+            ) {
                 // Set the value. If this is a custom property name, set it in
                 // the field system name. (We are assuming that no property
                 // named after the field system name is ever set in the object,

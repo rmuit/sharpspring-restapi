@@ -314,9 +314,11 @@ class LocalLeadCache
             foreach ($external_lead as $key => $value) {
                 $external_value_set = isset($value) && $value !== '';
                 $sharpspring_value_set = isset($sharpspring_lead[$key]) && $sharpspring_lead[$key] !== '';
-                if ($sharpspring_value_set !== $external_value_set
+                if (
+                    $sharpspring_value_set !== $external_value_set
                     || ($key === 'emailAddress' ? strtolower($sharpspring_lead[$key]) !== strtolower($value)
-                        : (string)$sharpspring_lead[$key] !== (string)$value)) {
+                        : (string)$sharpspring_lead[$key] !== (string)$value)
+                ) {
                     $diff[$key] = isset($sharpspring_lead[$key]) ? $sharpspring_lead[$key] : null;
                 }
             }

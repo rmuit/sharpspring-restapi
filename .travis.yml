@@ -1,6 +1,6 @@
 language: php
 
-# We're only doing code a standards check; building on just 5.6 should suffice.
+# We're only doing a code standards check; building on just 5.6 should suffice.
 php:
   - 5.6
 
